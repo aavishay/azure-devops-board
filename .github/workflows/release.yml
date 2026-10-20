@@ -1,0 +1,133 @@
+# Release workflow. Push a tag like v1.0.1 and it will
+#   1. build installers on macOS (universal), Linux and Windows,
+#   2. attach them to one GitHub release,
+#   3. update Casks/azdevops.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
+# Step 3 needs the repo secret HOMEBREW_TAP_TOKEN (contents:write on the tap); without it the cask is skipped.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin
+          - os: ubuntu-22.04
+            args: ""
+          - os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev libssl-dev patchelf rpm
+
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build
+        working-directory: src-tauri
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cargo tauri build ${{ matrix.args }} --config "{\"version\":\"$VER\"}"
+
+      - name: Collect installers
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          B=src-tauri/target
+          case "$RUNNER_OS" in
+            macOS)
+              cp "$B"/universal-apple-darwin/release/bundle/dmg/*.dmg "dist/azdevops-$VER-macos-universal.dmg" ;;
+            Linux)
+              cp "$B"/release/bundle/deb/*.deb "dist/azdevops-$VER-linux-amd64.deb"
+              cp "$B"/release/bundle/rpm/*.rpm "dist/azdevops-$VER-linux-x86_64.rpm"
+              cp "$B"/release/bundle/appimage/*.AppImage "dist/azdevops-$VER-linux-x86_64.AppImage" ;;
+            Windows)
+              cp "$B"/release/bundle/msi/*.msi "dist/azdevops-$VER-windows-x64.msi"
+              cp "$B"/release/bundle/nsis/*.exe "dist/azdevops-$VER-windows-x64-setup.exe" ;;
+          esac
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  # One job creates the release, so the three builds never race to create it.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  cask:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Check for the tap token
+        if: env.TAP_TOKEN == ''
+        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew cask was not updated."
+
+      - uses: actions/checkout@v4
+        if: env.TAP_TOKEN != ''
+
+      - uses: actions/download-artifact@v4
+        if: env.TAP_TOKEN != ''
+        with:
+          name: installers-macOS
+          path: dist
+
+      - uses: actions/checkout@v4
+        if: env.TAP_TOKEN != ''
+        with:
+          repository: aavishay/homebrew-azure-devops-board
+          token: ${{ env.TAP_TOKEN }}
+          path: tap
+
+      - name: Update the cask
+        if: env.TAP_TOKEN != ''
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          scripts/update-cask.sh "$VER" "dist/azdevops-$VER-macos-universal.dmg" tap/Casks/azdevops.rb
+          cd tap
+          if git diff --quiet; then echo "Cask already at $VER."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "azdevops $VER"
+          git push

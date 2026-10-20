@@ -1,0 +1,36 @@
+# Builds installers for Windows (.msi/.exe), macOS (.dmg/.app) and Linux (.deb/.rpm/.AppImage).
+trigger:
+  branches: { include: [main] }
+  tags: { include: ['v*'] }
+
+strategy:
+  matrix:
+    windows: { imageName: 'windows-latest' }
+    macos:   { imageName: 'macOS-latest' }
+    linux:   { imageName: 'ubuntu-22.04' }
+
+pool:
+  vmImage: $(imageName)
+
+steps:
+  - script: |
+      sudo apt-get update
+      sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev libssl-dev libayatana-appindicator3-dev patchelf
+    displayName: Linux build dependencies
+    condition: eq(variables['Agent.OS'], 'Linux')
+
+  - script: rustup update stable && rustup default stable
+    displayName: Rust toolchain
+
+  - script: cargo install tauri-cli --version "^2" --locked
+    displayName: Tauri CLI
+
+  - script: cargo tauri build
+    displayName: Build installers
+    workingDirectory: src-tauri
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish installers
+    inputs:
+      targetPath: src-tauri/target/release/bundle
+      artifact: devops-board-$(Agent.OS)

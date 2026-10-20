@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DevOps Team Board</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <img class="logo" src="logo.svg" alt="" width="54" height="54">
+      <div>
+        <h1 id="title">DevOps Team Board</h1>
+        <div class="sub" id="subtitle">Azure Boards</div>
+      </div>
+    </div>
+    <div class="meta">
+      <span><span class="dot" id="dot"></span> <span id="stamp">Loading…</span></span>
+      <label class="me" for="me">I am
+        <select id="me"><option value="">—</option></select>
+      </label>
+      <button class="btn primary" id="refresh" type="button"><span class="spin" aria-hidden="true">↻</span><span id="refreshLabel">Refresh</span></button>
+      <a class="btn" id="adoLink" href="#">Open in Azure DevOps ↗</a>
+      <button class="btn" id="accountBtn" type="button"><span class="acct-dot" id="acctDot"></span><span id="accountLabel">Sign in</span></button>
+      <button class="btn icon" id="settingsBtn" type="button" title="Settings" aria-label="Settings">⚙</button>
+    </div>
+  </header>
+
+  <div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+
+  <details class="history" id="historyBox" open hidden>
+    <summary><h2>What changed</h2><span class="n" id="historyCount"></span></summary>
+    <ul id="history"></ul>
+  </details>
+
+  <section class="stats" id="stats" aria-label="Summary"></section>
+
+  <section class="load" aria-label="Load by owner">
+    <div class="load-head">
+      <h2>Load by owner</h2>
+      <div class="legend"><span><i style="background:var(--crit)"></i>Incidents</span><span><i class="new"></i>New</span><span><i style="background:var(--todo)"></i>To Do</span><span><i style="background:var(--doing)"></i>In Progress</span></div>
+    </div>
+    <div class="rows" id="load"></div>
+  </section>
+
+  <section class="filters" aria-label="Filters">
+    <input class="search" id="q" type="search" placeholder="Search title or ID" aria-label="Search tickets">
+    <div id="typeChips"></div>
+    <button class="clear" id="clear" type="button">Clear filters</button>
+  </section>
+
+  <section class="board" id="board">
+    <div class="lane is-new" id="laneNew" style="--lane-c:var(--todo)" hidden>
+      <div class="lane-head"><h2>New</h2><span class="count" id="c-new"></span></div>
+      <div id="lane-new"></div>
+    </div>
+    <div class="lane" style="--lane-c:var(--todo)">
+      <div class="lane-head"><h2>To Do &amp; Committed</h2><span class="count" id="c-todo"></span></div>
+      <div id="lane-todo"></div>
+    </div>
+    <div class="lane" style="--lane-c:var(--doing)">
+      <div class="lane-head"><h2>In Progress</h2><span class="count" id="c-doing"></span></div>
+      <div id="lane-doing"></div>
+    </div>
+  </section>
+
+  <footer>
+    <span><i class="sw k-incident"></i>Incident</span>
+    <span><i class="sw k-pbi"></i>PBI</span>
+    <span><i class="sw k-task"></i>Task</span>
+    <span><i class="sw k-bug"></i>Bug</span>
+    <span><i class="sw hz"></i>Priority 1</span>
+    <span><i class="sw fold"></i>Assigned to you</span>
+    <span>Added means it appeared on the board in the last 24 hours</span>
+    <span id="scope"></span>
+  </footer>
+</div>
+
+<!-- Sign in -->
+<dialog id="signin" aria-labelledby="signinTitle">
+  <form method="dialog" class="dlg" id="signinForm">
+    <h2 id="signinTitle">Sign in to Azure DevOps</h2>
+    <p class="muted" id="signinOrg">Organization: —</p>
+
+    <section class="opt">
+      <h3>Microsoft account</h3>
+      <p class="muted">Signs in with your work account in the browser. Nothing to copy or renew.</p>
+      <button class="btn primary wide" id="msBtn" type="button">Sign in with Microsoft</button>
+      <p class="hint" id="msHint" hidden>Microsoft sign-in needs your organization's Application (client) ID. Ask your Azure admin, then add it in <a href="#" id="msToSettings">Settings</a>. Until then, use a token below.</p>
+      <p class="hint" id="msWaiting" hidden>Finish signing in in your browser… <button class="linkbtn" id="msCancel" type="button">Cancel</button></p>
+    </section>
+
+    <div class="or"><span>or</span></div>
+
+    <section class="opt">
+      <h3>Personal Access Token</h3>
+      <p class="muted">Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with scope <b>Work Items (Read)</b>.</p>
+      <div class="row2">
+        <input id="pat" type="password" autocomplete="off" spellcheck="false" placeholder="Paste token">
+        <button class="btn" id="patBtn" type="button">Save token</button>
+      </div>
+      <p class="hint">The token is stored in your system keychain, never in a file.</p>
+    </section>
+
+    <p class="err" id="signinErr" role="alert" hidden></p>
+    <div class="actions">
+      <button class="linkbtn danger" id="signOutBtn" type="button" hidden>Sign out</button>
+      <span style="flex:1"></span>
+      <button class="btn" value="cancel" id="signinClose">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Settings -->
+<dialog id="settings" aria-labelledby="settingsTitle">
+  <form method="dialog" class="dlg wide" id="settingsForm">
+    <h2 id="settingsTitle">Settings</h2>
+    <fieldset>
+      <legend>Azure DevOps</legend>
+      <label>Organization<input name="org" required placeholder="contoso"></label>
+      <label>Project<input name="project" required placeholder="Fabrikam"></label>
+      <label class="span2">Area path <span class="muted">(sub-areas included)</span><input name="areaPath" placeholder="Fabrikam\DevOps"></label>
+      <label class="span2">Board link <span class="muted">(for “Open in Azure DevOps”)</span><input name="boardUrl" placeholder="https://dev.azure.com/…/_boards/board/t/DevOps"></label>
+      <label class="span2">Server URL <span class="muted">(change only for Azure DevOps Server)</span><input name="adoUrl" placeholder="https://dev.azure.com"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Board</legend>
+      <label class="span2">States shown <span class="muted">(comma-separated)</span><input name="states" placeholder="To Do, Committed, In Progress"></label>
+      <label class="span2">“New” lane states <span class="muted">(blank hides the lane)</span><input name="newStates" placeholder="New"></label>
+      <label class="span2">“In Progress” lane states<input name="doingStates" placeholder="In Progress"></label>
+      <label>Changed in the last (days)<input name="lookbackDays" type="number" min="1" max="3650"></label>
+      <label>Auto-refresh every (minutes)<input name="refreshMinutes" type="number" min="1" max="1440"></label>
+      <label>Title<input name="title"></label>
+      <label>Time zone <span class="muted">(blank = this computer)</span><input name="timeZone" placeholder="Europe/London"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Microsoft sign-in</legend>
+      <label>Tenant<input name="tenantId" placeholder="contoso.com or the tenant ID"></label>
+      <label>Application (client) ID<input name="clientId" placeholder="00000000-0000-0000-0000-000000000000"></label>
+      <p class="hint span2">From an Entra ID app registration with platform <b>Mobile and desktop applications</b>, redirect URI <code>http://localhost</code>, and the <b>Azure DevOps → user_impersonation</b> permission. See the README.</p>
+    </fieldset>
+    <p class="err" id="settingsErr" role="alert" hidden></p>
+    <div class="actions">
+      <span style="flex:1"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" id="settingsSave" type="submit" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="workstreams.js"></script>
+<script src="workstreams.local.js" onerror="this.remove()"></script>
+<script src="app.js"></script>
+</body>
+</html>
