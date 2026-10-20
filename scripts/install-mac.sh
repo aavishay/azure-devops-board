@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds Azure DevOps Board on this Mac and installs it into /Applications.
-# Use this before the first GitHub release exists; afterwards `brew install --cask azdevops` is simpler.
+# Use this before the first GitHub release exists; afterwards `brew install --cask azure-devops-board` is simpler.
 set -euo pipefail
 cd "$(dirname "$0")/../src-tauri"
 

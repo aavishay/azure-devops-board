@@ -4,7 +4,7 @@
 set -euo pipefail
 VER="${1:?version, e.g. 1.0.1}"
 DMG="${2:?path to the macOS .dmg}"
-CASK="${3:-../homebrew-azure-devops-board/Casks/azdevops.rb}"
+CASK="${3:-../homebrew-azure-devops-board/Casks/azure-devops-board.rb}"
 if command -v sha256sum >/dev/null; then SHA=$(sha256sum "$DMG" | cut -d' ' -f1); else SHA=$(shasum -a 256 "$DMG" | cut -d' ' -f1); fi
 # Portable in-place edit (GNU and BSD sed differ on -i).
 tmp=$(mktemp)

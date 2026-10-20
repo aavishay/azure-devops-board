@@ -24,10 +24,10 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 
 ```sh
 brew tap aavishay/azure-devops-board
-brew install --cask azdevops
+brew install --cask azure-devops-board
 ```
 
-Upgrade with `brew upgrade --cask azdevops`. `brew uninstall --zap --cask azdevops` also removes settings and the board cache.
+Upgrade with `brew upgrade --cask azure-devops-board`. `brew uninstall --zap --cask azure-devops-board` also removes settings and the board cache.
 
 Before the first GitHub release exists, build and install it on your Mac in one step: `scripts/install-mac.sh` (installs Rust through Homebrew if it's missing).
 
@@ -37,7 +37,7 @@ Homebrew casks are macOS-only. Download the installer from the [GitHub releases]
 
 | OS | File | Note |
 |---|---|---|
-| Windows | `azdevops-<ver>-windows-x64.msi` or `…-setup.exe` | WebView2 ships with Windows 10/11. |
+| Windows | `azure-devops-board-<ver>-windows-x64.msi` or `…-setup.exe` | WebView2 ships with Windows 10/11. |
 | Linux | `.deb` (Ubuntu/Debian), `.rpm` (Fedora/RHEL) or `.AppImage` (any distro) | Needs WebKitGTK 4.1 (preinstalled on current GNOME/KDE desktops). |
 
 ## First run
