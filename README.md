@@ -24,6 +24,7 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 
 ```sh
 brew tap aavishay/azure-devops-board
+brew trust aavishay/azure-devops-board   # Homebrew 7+ asks you to trust third-party taps
 brew install --cask azure-devops-board
 ```
 
