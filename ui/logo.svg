@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824">
+  <defs>
+    <linearGradient id="rack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A4752"/>
+      <stop offset="1" stop-color="#171D22"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E9EEF2"/>
+      <stop offset=".55" stop-color="#A9B5BE"/>
+      <stop offset="1" stop-color="#6E7B85"/>
+    </linearGradient>
+    <linearGradient id="pbi" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3B7BE0"/><stop offset="1" stop-color="#1F5FBF"/>
+    </linearGradient>
+    <linearGradient id="inc" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EC3A52"/><stop offset="1" stop-color="#C8102E"/>
+    </linearGradient>
+    <linearGradient id="haz" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7BE3A"/><stop offset="1" stop-color="#E29A0E"/>
+    </linearGradient>
+    <linearGradient id="stock" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#E3E9EE"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".16"/><stop offset=".45" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#000" flood-opacity=".45"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-50%" width="140%" height="220%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+    <clipPath id="body"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+
+  <!-- the rack -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#rack)"/>
+  <g clip-path="url(#body)" stroke="#fff" stroke-opacity=".06" stroke-width="6">
+    <line x1="100" y1="430" x2="924" y2="430"/>
+    <line x1="100" y1="560" x2="924" y2="560"/>
+    <line x1="100" y1="690" x2="924" y2="690"/>
+    <line x1="100" y1="820" x2="924" y2="820"/>
+  </g>
+
+  <!-- three T-cards: bodies drop into the slot, the wider heads rest on the rail -->
+  <g filter="url(#drop)">
+    <rect x="232" y="300" width="132" height="368" rx="14" fill="url(#stock)"/>
+    <rect x="446" y="300" width="132" height="474" rx="14" fill="url(#stock)"/>
+    <rect x="660" y="300" width="132" height="308" rx="14" fill="url(#stock)"/>
+  </g>
+  <g fill="#B9C4CC">
+    <rect x="256" y="384" width="84" height="16" rx="8"/><rect x="256" y="418" width="60" height="16" rx="8"/>
+    <rect x="470" y="384" width="84" height="16" rx="8"/><rect x="470" y="418" width="60" height="16" rx="8"/><rect x="470" y="452" width="72" height="16" rx="8"/>
+    <rect x="684" y="384" width="84" height="16" rx="8"/><rect x="684" y="418" width="60" height="16" rx="8"/>
+  </g>
+
+  <!-- the steel rail -->
+  <rect x="150" y="326" width="724" height="30" rx="15" fill="url(#rail)" filter="url(#soft)"/>
+
+  <!-- heads: PBI, Incident, P1 -->
+  <g filter="url(#soft)">
+    <rect x="212" y="244" width="172" height="86" rx="16" fill="url(#pbi)"/>
+    <rect x="426" y="244" width="172" height="86" rx="16" fill="url(#inc)"/>
+    <rect x="640" y="244" width="172" height="86" rx="16" fill="url(#haz)"/>
+  </g>
+  <g fill="#fff" fill-opacity=".22">
+    <rect x="212" y="244" width="172" height="10" rx="5"/>
+    <rect x="426" y="244" width="172" height="10" rx="5"/>
+    <rect x="640" y="244" width="172" height="10" rx="5"/>
+  </g>
+
+  <!-- glass sheen and edge -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#fff" stroke-opacity=".12" stroke-width="4"/>
+</svg>
