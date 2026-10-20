@@ -1,7 +1,7 @@
 # Release workflow. Push a tag like v1.0.1 and it will
 #   1. build installers on macOS (universal), Linux and Windows,
 #   2. attach them to one GitHub release,
-#   3. update Casks/azdevops.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
+#   3. update Casks/azure-devops-board.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
 # Step 3 needs the repo secret HOMEBREW_TAP_TOKEN (contents:write on the tap); without it the cask is skipped.
 name: release
 
@@ -61,14 +61,14 @@ jobs:
           B=src-tauri/target
           case "$RUNNER_OS" in
             macOS)
-              cp "$B"/universal-apple-darwin/release/bundle/dmg/*.dmg "dist/azdevops-$VER-macos-universal.dmg" ;;
+              cp "$B"/universal-apple-darwin/release/bundle/dmg/*.dmg "dist/azure-devops-board-$VER-macos-universal.dmg" ;;
             Linux)
-              cp "$B"/release/bundle/deb/*.deb "dist/azdevops-$VER-linux-amd64.deb"
-              cp "$B"/release/bundle/rpm/*.rpm "dist/azdevops-$VER-linux-x86_64.rpm"
-              cp "$B"/release/bundle/appimage/*.AppImage "dist/azdevops-$VER-linux-x86_64.AppImage" ;;
+              cp "$B"/release/bundle/deb/*.deb "dist/azure-devops-board-$VER-linux-amd64.deb"
+              cp "$B"/release/bundle/rpm/*.rpm "dist/azure-devops-board-$VER-linux-x86_64.rpm"
+              cp "$B"/release/bundle/appimage/*.AppImage "dist/azure-devops-board-$VER-linux-x86_64.AppImage" ;;
             Windows)
-              cp "$B"/release/bundle/msi/*.msi "dist/azdevops-$VER-windows-x64.msi"
-              cp "$B"/release/bundle/nsis/*.exe "dist/azdevops-$VER-windows-x64-setup.exe" ;;
+              cp "$B"/release/bundle/msi/*.msi "dist/azure-devops-board-$VER-windows-x64.msi"
+              cp "$B"/release/bundle/nsis/*.exe "dist/azure-devops-board-$VER-windows-x64-setup.exe" ;;
           esac
           ls -l dist
 
@@ -124,10 +124,10 @@ jobs:
         if: env.TAP_TOKEN != ''
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          scripts/update-cask.sh "$VER" "dist/azdevops-$VER-macos-universal.dmg" tap/Casks/azdevops.rb
+          scripts/update-cask.sh "$VER" "dist/azure-devops-board-$VER-macos-universal.dmg" tap/Casks/azure-devops-board.rb
           cd tap
           if git diff --quiet; then echo "Cask already at $VER."; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "azdevops $VER"
+          git commit -am "azure-devops-board $VER"
           git push
