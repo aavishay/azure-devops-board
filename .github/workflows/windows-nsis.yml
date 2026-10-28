@@ -1,0 +1,138 @@
+# Windows installer. Pull requests run it as a build check, and release.yml calls
+# it with a tag to produce the release asset, so a release builds exactly what PRs test.
+name: Windows installer
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, used to set the version and name the asset. Empty for a build-only check."
+        required: false
+        type: string
+        default: ""
+
+# Read-only: this only produces an artifact. Attaching it to a release is release.yml's job.
+permissions:
+  contents: read
+
+jobs:
+  nsis:
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git Bash, so the steps read like the Linux ones. PowerShell only where
+        # Windows itself is the subject.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # The only place the Windows keychain backend and the cfg(unix)-free code get compiled and tested.
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Version
+        id: ver
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -n "$TAG" ]; then VER="${TAG#v}"; else VER=$(jq -r .version src-tauri/tauri.conf.json); fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      # NSIS only: a per-user install that needs no admin rights. Retried because
+      # bundling downloads NSIS from GitHub at the very end.
+      - name: Build the installer
+        working-directory: src-tauri
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if cargo tauri build --bundles nsis --config "{\"version\":\"${{ steps.ver.outputs.ver }}\"}"; then
+              [ "$attempt" -gt 1 ] && echo "::warning::NSIS bundling succeeded on attempt $attempt"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::NSIS bundling failed on attempt $attempt, retrying"
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "::error::NSIS bundling failed three times"
+          exit 1
+
+      - name: Name the asset and checksum it
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BUILT=$(find src-tauri/target/release/bundle/nsis -maxdepth 1 -name '*-setup.exe' -print -quit)
+          [ -n "$BUILT" ] || { echo "::error::no NSIS installer was produced"; exit 1; }
+          ASSET="azure-devops-board-${{ steps.ver.outputs.ver }}-windows-x64-setup.exe"
+          cp "$BUILT" "dist/$ASSET"
+          cd dist
+          sha256sum "$ASSET" | tee SHA256SUMS-windows.txt
+
+      # Unpacked with 7-Zip rather than installed, so the checks below see the app itself.
+      - name: Unpack the installer
+        run: |
+          set -euo pipefail
+          EXE=$(find dist -name '*-setup.exe' -print -quit)
+          7z x -y -ounpacked "$EXE" > /dev/null
+          [ -f unpacked/devops-board.exe ] \
+            || { echo "::error::the installer holds no devops-board.exe"; find unpacked -maxdepth 2; exit 1; }
+
+      # The app, not the installer: an NSIS installer is a 32-bit stub whatever it carries.
+      - name: Verify the app is an x64 Windows executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [System.IO.File]::ReadAllBytes("unpacked\devops-board.exe")
+          # e_lfanew at 0x3C points at the PE signature; the machine field follows it. 0x8664 is x86-64.
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $sig = [System.Text.Encoding]::ASCII.GetString($bytes, $pe, 4)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          "signature=$($sig.Trim([char]0)) machine=0x{0:X4}" -f $machine
+          if ($sig -ne "PE`0`0" -or $machine -ne 0x8664) { throw "not an x64 PE executable" }
+
+      # Not proof it can reach Azure DevOps: there are no settings here. It is proof
+      # the app starts and stays up, which is where a missing WebView2 or a panic shows.
+      - name: The app starts and stays running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Start-Process -FilePath "unpacked\devops-board.exe" -PassThru
+          Start-Sleep -Seconds 15
+          $app.Refresh()
+          if ($app.HasExited) { throw "the app exited within 15s, with code $($app.ExitCode)" }
+          "still running after 15s (pid $($app.Id))"
+          Stop-Process -Id $app.Id -Force
+
+      # Two attempts: a failed artifact upload leaves the release without this platform.
+      - uses: actions/upload-artifact@v7
+        id: upload
+        continue-on-error: true
+        with:
+          name: windows-nsis
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Retry the upload
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-nsis
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Say so if the upload needed a retry
+        if: steps.upload.outcome == 'failure'
+        run: echo "::warning::the artifact upload failed once and succeeded on retry"
