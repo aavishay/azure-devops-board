@@ -43,6 +43,9 @@ pub struct Item {
     pub owner_changed_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_owner: Option<Option<String>>,
+    /// Set when Azure DevOps links this item as a duplicate of another board item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,9 +324,16 @@ impl Ado<'_> {
                     first_seen: 0,
                     owner_changed_at: 0,
                     prev_owner: None,
+                    duplicate_of: None,
                 }
             })
             .collect();
+        // Duplicates are cosmetic: if the link query fails, show every item unmerged.
+        if let Ok(dups) = self.duplicates(&ids).await {
+            for it in items.iter_mut() {
+                it.duplicate_of = dups.get(&it.id).copied();
+            }
+        }
         // Keep the server's order (most recently changed first).
         let order: HashMap<u64, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
         items.sort_by_key(|i| order.get(&i.id).copied().unwrap_or(usize::MAX));
@@ -351,6 +361,35 @@ impl Ado<'_> {
         }
         Ok((items, parents))
     }
+
+    /// Maps each duplicate to its original, for "Duplicate" links where both items are in `ids`.
+    /// In Azure DevOps the original holds the Duplicate-Forward link and the duplicate the reverse ("Duplicate Of").
+    async fn duplicates(&self, ids: &[u64]) -> Result<HashMap<u64, u64>, String> {
+        if ids.len() < 2 {
+            return Ok(HashMap::new());
+        }
+        let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let wiql = format!(
+            "SELECT [System.Id] FROM WorkItemLinks WHERE [Source].[System.Id] IN ({list}) AND [System.Links.LinkType] = 'System.LinkTypes.Duplicate-Forward' AND [Target].[System.Id] IN ({list}) MODE (MustContain)"
+        );
+        let r = self
+            .call(reqwest::Method::POST, format!("{}/wit/wiql?api-version=7.1", self.settings.project_api()), Some(serde_json::json!({ "query": wiql })))
+            .await?;
+        Ok(duplicate_map(&r))
+    }
+}
+
+fn duplicate_map(r: &Value) -> HashMap<u64, u64> {
+    r["workItemRelations"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|l| l["rel"].as_str() == Some("System.LinkTypes.Duplicate-Forward"))
+                .filter_map(|l| Some((l["target"]["id"].as_u64()?, l["source"]["id"].as_u64()?)))
+                .filter(|(dup, orig)| dup != orig)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn owner_of(v: &Value) -> (Option<String>, Option<String>) {
@@ -405,7 +444,20 @@ mod tests {
             first_seen: 0,
             owner_changed_at: 0,
             prev_owner: None,
+            duplicate_of: None,
         }
+    }
+
+    #[test]
+    fn duplicate_links() {
+        let r = serde_json::json!({ "workItemRelations": [
+            { "rel": null, "source": null, "target": { "id": 10 } },
+            { "rel": "System.LinkTypes.Duplicate-Forward", "source": { "id": 10 }, "target": { "id": 20 } },
+            { "rel": "System.LinkTypes.Related", "source": { "id": 10 }, "target": { "id": 30 } },
+        ]});
+        let m = duplicate_map(&r);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get(&20), Some(&10));
     }
 
     #[test]
