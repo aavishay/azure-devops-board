@@ -2,7 +2,8 @@
 #   1. build installers on macOS (universal), Linux and Windows,
 #   2. attach them to one GitHub release,
 #   3. update Casks/azure-devops-board.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
-# Step 3 needs the repo secret HOMEBREW_TAP_TOKEN (contents:write on the tap); without it the cask is skipped.
+# Step 3 needs the repo secret TAP_DEPLOY_KEY: the private half of a write-enabled deploy key on the tap.
+# Without it the cask is skipped.
 name: release
 
 on:
@@ -98,30 +99,30 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     env:
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
     steps:
-      - name: Check for the tap token
-        if: env.TAP_TOKEN == ''
-        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew cask was not updated."
+      - name: Check for the tap deploy key
+        if: env.TAP_KEY == ''
+        run: echo "::warning::TAP_DEPLOY_KEY is not set, so the Homebrew cask was not updated."
 
       - uses: actions/checkout@v4
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
 
       - uses: actions/download-artifact@v4
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         with:
           name: installers-macOS
           path: dist
 
       - uses: actions/checkout@v4
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         with:
           repository: aavishay/homebrew-azure-devops-board
-          token: ${{ env.TAP_TOKEN }}
+          ssh-key: ${{ env.TAP_KEY }}
           path: tap
 
       - name: Update the cask
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         run: |
           VER="${GITHUB_REF_NAME#v}"
           scripts/update-cask.sh "$VER" "dist/azure-devops-board-$VER-macos-universal.dmg" tap/Casks/azure-devops-board.rb

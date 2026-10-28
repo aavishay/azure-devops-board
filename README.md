@@ -105,7 +105,7 @@ Each OS's installer must be built on that OS, so releases are built in CI:
 
 1. Push this folder to `github.com/aavishay/azure-devops-board` and create the tap repo `github.com/aavishay/homebrew-azure-devops-board` from `~/src/homebrew-azure-devops-board`.
 2. The workflow is `.github/workflows/release.yml`.
-3. Add a repo secret `HOMEBREW_TAP_TOKEN`: a fine-grained token with **Contents: read and write** on `homebrew-azure-devops-board`. Without it, releases still build but the cask is not updated.
+3. Add a deploy key with **write access** to `homebrew-azure-devops-board`, and store its private key as the repo secret `TAP_DEPLOY_KEY`. Without it, releases still build but the cask is not updated.
 4. Tag and push: `git tag v1.0.0 && git push --tags`.
 
 The workflow builds the macOS universal `.dmg`, Linux `.deb`/`.rpm`/`.AppImage` and Windows `.msi`/`.exe`, attaches them to the release, then sets the new version and sha256 in the cask (`scripts/update-cask.sh`). `azure-pipelines.yml` still builds the same installers as Azure DevOps pipeline artifacts if you prefer that.
