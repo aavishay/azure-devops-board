@@ -82,28 +82,7 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: dist/*
           generate_release_notes: true
-          body: |
-            ## Install
-
-            **macOS** (universal: Apple Silicon and Intel)
-
-            ```bash
-            brew tap aavishay/azure-devops-board
-            brew trust aavishay/azure-devops-board
-            brew install --cask azure-devops-board
-            ```
-
-            The build is not notarized. The cask clears the quarantine flag, but if you
-            install the `.dmg` or `.app.zip` directly, clear it once yourself:
-
-            ```bash
-            xattr -dr com.apple.quarantine "/Applications/Azure DevOps Board.app"
-            ```
-
-            **Windows:** run the `windows-x64-setup.exe`. It is not code-signed, so
-            SmartScreen may say "Windows protected your PC": choose **More info → Run anyway**.
-
-            **Linux:** download the `.AppImage`, `chmod +x` it and run it. Needs WebKitGTK 4.1.
+          body_path: .github/release-body.md
 
       - name: Retry attaching the macOS assets
         if: steps.publish.outcome == 'failure'
@@ -111,8 +90,11 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           files: dist/*
-          # No body or release notes: the first attempt set them, and repeating
-          # generate_release_notes would append a second copy.
+          # Same body and notes as the first attempt, in case it failed before the
+          # release existed. A supplied body replaces the existing text before the
+          # notes are added, so this cannot leave two copies of them.
+          generate_release_notes: true
+          body_path: .github/release-body.md
 
       # A success from the action is not the same fact as the assets being there,
       # so ask GitHub. Matched by whole name, so a near-miss rename can't pass.
