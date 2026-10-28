@@ -30,7 +30,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,7 +73,7 @@ jobs:
           esac
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installers-${{ runner.os }}
           path: dist/*
@@ -84,13 +84,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: installers-*
           merge-multiple: true
           path: dist
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
@@ -105,16 +105,16 @@ jobs:
         if: env.TAP_KEY == ''
         run: echo "::warning::TAP_DEPLOY_KEY is not set, so the Homebrew cask was not updated."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: env.TAP_KEY != ''
         with:
           name: installers-macOS
           path: dist
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
         with:
           repository: aavishay/homebrew-azure-devops-board
