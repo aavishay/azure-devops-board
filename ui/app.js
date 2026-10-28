@@ -10,10 +10,21 @@
   };
 
   let BOARD = null;       // last load_board payload
-  let T = [];             // cards
+  let ALL = [];           // every card
+  let T = [];             // cards minus hidden people's
   let PARENTS = {};
   const f = { q: "", owner: store.get("owner", "") || null, preset: null, ws: WS.ORDER.includes(store.get("ws", "")) ? store.get("ws", "") : null, types: new Set((() => { try { const v = JSON.parse(store.get("types", "[]")); return Array.isArray(v) ? v : []; } catch { return []; } })()), group: store.get("group", "ws") === "owner" ? "owner" : "ws" };
   let me = store.get("me", "");
+  // People whose tickets are left off the board ("—" is Unassigned), remembered across restarts.
+  const hidden = new Set((() => { try { const v = JSON.parse(store.get("hidden", "[]")); return Array.isArray(v) ? v : []; } catch { return []; } })());
+  const visible = () => ALL.filter((t) => !hidden.has(t.owner || "—"));
+  function setHidden(name, on) {
+    if (name === null) hidden.clear(); else if (on) hidden.add(name); else hidden.delete(name);
+    store.set("hidden", JSON.stringify([...hidden]));
+    if (on && f.owner === name) { f.owner = null; saveFilters(); }
+    T = visible();
+    render();
+  }
 
   /* ---------- helpers ---------- */
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -40,8 +51,22 @@
   function compose(snap) {
     const now = Date.now();
     PARENTS = snap.parents || {};
-    return (snap.items || []).map((it) => ({
+    const items = snap.items || [];
+    // Items Azure DevOps links as duplicates fold into their original's card (following chains, guarding loops).
+    const byId = new Map(items.map((it) => [it.id, it]));
+    const rootOf = (it) => {
+      const seen = new Set();
+      while (it.duplicateOf && byId.has(it.duplicateOf) && !seen.has(it.id)) { seen.add(it.id); it = byId.get(it.duplicateOf); }
+      return it;
+    };
+    const dups = new Map();
+    for (const it of items) {
+      const root = rootOf(it);
+      if (root !== it) dups.set(root.id, [...(dups.get(root.id) || []), it]);
+    }
+    return items.filter((it) => rootOf(it) === it).map((it) => ({
       ...it,
+      dups: dups.get(it.id) || [],
       committed: it.rawState === "Committed",
       ws: guessWs(it.id, it.parent, it.title),
       isNew: !!it.firstSeen && now - it.firstSeen < DAY,
@@ -62,7 +87,11 @@
     if (f.preset && !presets[f.preset].n(t)) return false;
     if (f.ws && t.ws !== f.ws) return false;
     if (f.types.size && !f.types.has(t.type)) return false;
-    if (f.q) { const q = f.q.toLowerCase(); if (!(t.title.toLowerCase().includes(q) || String(t.id).includes(q))) return false; }
+    if (f.q) {
+      const q = f.q.toLowerCase();
+      const hit = (x) => x.title.toLowerCase().includes(q) || String(x.id).includes(q);
+      if (!hit(t) && !t.dups.some(hit)) return false;
+    }
     return true;
   }
   const saveFilters = () => { store.set("types", JSON.stringify([...f.types])); store.set("ws", f.ws || ""); store.set("owner", f.owner || ""); };
@@ -86,11 +115,13 @@
     const parentLine = t.parent
       ? `<div class="parent">↳ <a href="${esc(par?.url || "#")}" target="_blank" rel="noopener">#${esc(t.parent)}</a> ${esc(par?.title || "Parent PBI")}${par?.state ? ` <span class="ps">(${esc(par.state)})</span>` : ""}</div>`
       : "";
+    const dupLines = t.dups.map((d) =>
+      `<div class="dup" title="Linked in Azure DevOps as a duplicate of #${esc(t.id)}">Duplicate <a href="${esc(d.url)}" target="_blank" rel="noopener">#${esc(d.id)}</a> ${esc(d.title)}${d.rawState !== t.rawState ? ` <span class="ps">(${esc(d.rawState)})</span>` : ""}</div>`).join("");
     return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}">
       <div class="tab"><a class="id" href="${esc(t.url)}" target="_blank" rel="noopener" aria-label="Open #${esc(t.id)} in Azure DevOps">${esc(t.id)}</a><span class="kind">${esc(t.type)}</span>${flags}<span class="pri${t.p === 1 ? " p1" : ""}" title="Priority ${esc(t.p)}">P${esc(t.p)}</span></div>
       <div class="body">
         <div class="title">${esc(t.title)}</div>
-        ${parentLine}
+        ${dupLines}${parentLine}
         <div class="foot">${owner}${creator}${f.group === "ws" ? "" : `<span class="ws">${esc(t.ws)}</span>`}</div>
       </div>
     </article>`;
@@ -144,11 +175,16 @@
     const w = (v) => `${(v / max) * 100}%`;
     $("load").innerHTML = data.map((d) => {
       const lb = d.n === "—" ? "Unassigned" : label(d.n);
-      return `<button class="row" type="button" data-owner="${esc(d.n)}" aria-pressed="${f.owner === d.n}" title="${esc(lb)}: ${d.inc} incidents, ${d.fresh} other new, ${d.todo} other to do, ${d.doing} in progress">
+      return `<div class="row-wrap"><button class="row" type="button" data-owner="${esc(d.n)}" aria-pressed="${f.owner === d.n}" title="${esc(lb)}: ${d.inc} incidents, ${d.fresh} other new, ${d.todo} other to do, ${d.doing} in progress">
         <span class="who">${esc(lb)}</span>
         <span class="bar"><span style="width:${w(d.inc)};background:var(--crit)"></span><span class="new" style="width:${w(d.fresh)}"></span><span style="width:${w(d.todo)};background:var(--todo)"></span><span style="width:${w(d.doing)};background:var(--doing)"></span></span>
-        <span class="c">${d.total}</span></button>`;
+        <span class="c">${d.total}</span></button><button class="hide-btn" type="button" data-hide="${esc(d.n)}" aria-label="Hide ${esc(lb)}'s tickets" title="Hide ${esc(lb)}'s tickets from the board">Hide</button></div>`;
     }).join("");
+    const hid = [...hidden].filter((n) => ALL.some((t) => (t.owner || "—") === n)).sort();
+    $("hiddenOwners").hidden = !hid.length;
+    $("hiddenOwners").innerHTML = hid.length
+      ? `<span>Hidden:</span>${hid.map((n) => { const lb = n === "—" ? "Unassigned" : label(n); return `<button class="chip" type="button" data-unhide="${esc(n)}" aria-label="Show ${esc(lb)}'s tickets again" title="Show ${esc(lb)}'s tickets again">${esc(lb)} ×</button>`; }).join("")}${hid.length > 1 ? `<button class="clear" type="button" data-unhide="">Show all</button>` : ""}`
+      : "";
   }
 
   function renderChips() {
@@ -170,7 +206,7 @@
 
   function renderMe() {
     const sel = $("me");
-    const owners = [...new Set(T.map((t) => t.owner).filter(Boolean))].sort();
+    const owners = [...new Set(ALL.map((t) => t.owner).filter(Boolean))].sort();
     if (me && !owners.includes(me)) owners.unshift(me);
     sel.innerHTML = `<option value="">—</option>` + owners.map((o) => `<option value="${esc(o)}"${o === me ? " selected" : ""}>${esc(o)}</option>`).join("");
   }
@@ -186,7 +222,7 @@
       : c.kind === "owner" ? `${esc(c.from || "Unassigned")} → ${esc(c.to || "Unassigned")}`
       : "";
     $("history").innerHTML = h.map((c) => {
-      const url = T.find((t) => t.id === c.id)?.url || (BOARD.boardUrl.replace(/_boards.*$/, "") + "_workitems/edit/" + c.id);
+      const url = ALL.find((t) => t.id === c.id)?.url || (BOARD.boardUrl.replace(/_boards.*$/, "") + "_workitems/edit/" + c.id);
       return `<li><time>${esc(fmt(c.at))}</time><a class="hid" href="${esc(url)}" target="_blank" rel="noopener">#${esc(c.id)}</a><span class="what ${esc(c.kind)}">${what(c)}</span><span class="tt" title="${esc(c.title)}">${esc(c.title)}</span></li>`;
     }).join("");
   }
@@ -252,7 +288,8 @@
     $("subtitle").textContent = BOARD.subtitle;
     $("adoLink").href = BOARD.boardUrl;
     if (!store.get("me", "") && BOARD.user) { me = BOARD.user.split(/\s+/)[0]; store.set("me", me); }
-    T = BOARD.snapshot ? compose(BOARD.snapshot) : [];
+    ALL = BOARD.snapshot ? compose(BOARD.snapshot) : [];
+    T = visible();
     // A remembered person with nothing on the board would leave both lanes empty.
     if (BOARD.snapshot && f.owner !== null && !T.some((t) => (t.owner || "—") === f.owner)) f.owner = null;
     if (BOARD.snapshot && (!BOARD.lastError || Date.parse(BOARD.lastError.at) < Date.parse(BOARD.snapshot.updatedAt))) clearErrorNotice();
@@ -414,6 +451,8 @@
   document.addEventListener("click", (e) => {
     const s = e.target.closest("[data-preset]"); if (s) { const k = s.dataset.preset; f.preset = f.preset === k ? null : k; render(); return; }
     const gb = e.target.closest("[data-group]"); if (gb) { f.group = gb.dataset.group; store.set("group", f.group); render(); return; }
+    const hb = e.target.closest("[data-hide]"); if (hb) { setHidden(hb.dataset.hide, true); return; }
+    const ub = e.target.closest("[data-unhide]"); if (ub) { setHidden(ub.dataset.unhide || null, false); return; }
     const o = e.target.closest("[data-owner]"); if (o) { const k = o.dataset.owner; f.owner = f.owner === k ? null : k; saveFilters(); render(); return; }
     const c = e.target.closest("[data-chip]");
     if (c) {
