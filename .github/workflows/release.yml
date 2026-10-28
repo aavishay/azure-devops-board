@@ -1,7 +1,8 @@
-# Release workflow. Push a tag like v1.0.1 and it will
-#   1. build installers on macOS (universal), Linux and Windows,
-#   2. attach them to one GitHub release,
+# Release workflow. Push a tag like v1.0.1 (`git tag v1.0.1 && git push --tags`) and it will
+#   1. build and test on macOS, create the release and attach the universal .dmg and .app.zip,
+#   2. build the Linux AppImage and Windows installer (the same workflows PRs run) and attach them,
 #   3. update Casks/azure-devops-board.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
+# Also runnable by hand from the Actions tab to re-cut an existing tag.
 # Step 3 needs the repo secret TAP_DEPLOY_KEY: the private half of a write-enabled deploy key on the tap.
 # Without it the cask is skipped.
 name: release
@@ -9,97 +10,224 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            args: --target universal-apple-darwin
-          - os: ubuntu-22.04
-            args: ""
-          - os: windows-latest
-            args: ""
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
+  # Creates the release. Every other job that attaches to it waits for this one,
+  # so two jobs never race to create it.
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
 
+      # Without the x86_64 slice the app would refuse to launch on Intel Macs.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev libssl-dev patchelf rpm
-
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build universal .app and .dmg
         working-directory: src-tauri
-        run: |
-          VER="${GITHUB_REF_NAME#v}"
-          cargo tauri build ${{ matrix.args }} --config "{\"version\":\"$VER\"}"
+        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg --config "{\"version\":\"${TAG#v}\"}"
 
-      - name: Collect installers
+      - name: Collect assets and checksums
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
+          VER="${TAG#v}"
+          B=src-tauri/target/universal-apple-darwin/release/bundle
           mkdir -p dist
-          B=src-tauri/target
-          case "$RUNNER_OS" in
-            macOS)
-              cp "$B"/universal-apple-darwin/release/bundle/dmg/*.dmg "dist/azure-devops-board-$VER-macos-universal.dmg" ;;
-            Linux)
-              cp "$B"/release/bundle/deb/*.deb "dist/azure-devops-board-$VER-linux-amd64.deb"
-              cp "$B"/release/bundle/rpm/*.rpm "dist/azure-devops-board-$VER-linux-x86_64.rpm"
-              cp "$B"/release/bundle/appimage/*.AppImage "dist/azure-devops-board-$VER-linux-x86_64.AppImage" ;;
-            Windows)
-              cp "$B"/release/bundle/msi/*.msi "dist/azure-devops-board-$VER-windows-x64.msi"
-              cp "$B"/release/bundle/nsis/*.exe "dist/azure-devops-board-$VER-windows-x64-setup.exe" ;;
-          esac
-          ls -l dist
+          cp "$B"/dmg/*.dmg "dist/azure-devops-board-$VER-macos-universal.dmg"
+          # A zipped .app as well, for anyone who'd rather not mount a disk image.
+          ditto -c -k --keepParent "$B/macos/Azure DevOps Board.app" "dist/azure-devops-board-$VER-macos-universal.app.zip"
+          cd dist
+          shasum -a 256 -- * | tee SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@v7
+      - name: Verify the binary really is universal
+        run: |
+          set -euo pipefail
+          ARCHS=$(lipo -archs "src-tauri/target/universal-apple-darwin/release/bundle/macos/Azure DevOps Board.app/Contents/MacOS/devops-board")
+          echo "architectures: $ARCHS"
+          for want in arm64 x86_64; do
+            case "$ARCHS" in *"$want"*) ;; *) echo "::error::missing $want slice"; exit 1 ;; esac
+          done
+
+      # Retried: the action uploads the files concurrently, and GitHub sometimes
+      # answers one of them with a 500. Re-attaching a file that already landed is
+      # harmless, since the action replaces an asset of the same name.
+      - uses: softprops/action-gh-release@v3
+        id: publish
+        continue-on-error: true
         with:
-          name: installers-${{ runner.os }}
-          path: dist/*
-          if-no-files-found: error
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Install
 
-  # One job creates the release, so the three builds never race to create it.
-  publish:
-    needs: build
+            **macOS** (universal: Apple Silicon and Intel)
+
+            ```bash
+            brew tap aavishay/azure-devops-board
+            brew trust aavishay/azure-devops-board
+            brew install --cask azure-devops-board
+            ```
+
+            The build is not notarized. The cask clears the quarantine flag, but if you
+            install the `.dmg` or `.app.zip` directly, clear it once yourself:
+
+            ```bash
+            xattr -dr com.apple.quarantine "/Applications/Azure DevOps Board.app"
+            ```
+
+            **Windows:** run the `windows-x64-setup.exe`. It is not code-signed, so
+            SmartScreen may say "Windows protected your PC": choose **More info → Run anyway**.
+
+            **Linux:** download the `.AppImage`, `chmod +x` it and run it. Needs WebKitGTK 4.1.
+
+      - name: Retry attaching the macOS assets
+        if: steps.publish.outcome == 'failure'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+          # No body or release notes: the first attempt set them, and repeating
+          # generate_release_notes would append a second copy.
+
+      # A success from the action is not the same fact as the assets being there,
+      # so ask GitHub. Matched by whole name, so a near-miss rename can't pass.
+      - name: Confirm every macOS asset is on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.publish.outcome }}" = "failure" ] && echo "::warning::attaching the macOS assets failed once and was retried"
+          VER="${TAG#v}"
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$NAMES"
+          MISSING=0
+          for want in "azure-devops-board-$VER-macos-universal.dmg" "azure-devops-board-$VER-macos-universal.app.zip" "SHA256SUMS.txt"; do
+            printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
+          done
+          [ "$MISSING" -eq 0 ]
+
+  # Built by the same workflows pull requests run. They hold no write access and
+  # produce only an artifact; the publish jobs below attach it.
+  linux:
+    uses: ./.github/workflows/linux-appimage.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+
+  windows:
+    uses: ./.github/workflows/windows-nsis.yml
+    with:
+      tag: ${{ github.event.inputs.tag || github.ref_name }}
+
+  linux-publish:
+    needs: [macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: installers-*
-          merge-multiple: true
+          name: linux-appimage
+          path: dist
+
+      # No body or release notes: the macOS job owns those.
+      - uses: softprops/action-gh-release@v3
+        id: publish
+        continue-on-error: true
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+
+      - name: Retry attaching the Linux assets
+        if: steps.publish.outcome == 'failure'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+
+      - name: Confirm the Linux assets are on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.publish.outcome }}" = "failure" ] && echo "::warning::attaching the Linux assets failed once and was retried"
+          VER="${TAG#v}"
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$NAMES"
+          MISSING=0
+          for want in "azure-devops-board-$VER-linux-x86_64.AppImage" "SHA256SUMS-linux.txt"; do
+            printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
+          done
+          [ "$MISSING" -eq 0 ]
+
+  windows-publish:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-nsis
           path: dist
 
       - uses: softprops/action-gh-release@v3
+        id: publish
+        continue-on-error: true
         with:
+          tag_name: ${{ env.TAG }}
           files: dist/*
-          generate_release_notes: true
 
+      - name: Retry attaching the Windows assets
+        if: steps.publish.outcome == 'failure'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          files: dist/*
+
+      - name: Confirm the Windows assets are on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "${{ steps.publish.outcome }}" = "failure" ] && echo "::warning::attaching the Windows assets failed once and was retried"
+          VER="${TAG#v}"
+          NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$NAMES"
+          MISSING=0
+          for want in "azure-devops-board-$VER-windows-x64-setup.exe" "SHA256SUMS-windows.txt"; do
+            printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
+          done
+          [ "$MISSING" -eq 0 ]
+
+  # Takes the .dmg from the published release, so the cask's sha256 is of the
+  # exact file users download.
   cask:
-    needs: build
+    needs: macos
     runs-on: ubuntu-latest
     env:
       TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check for the tap deploy key
         if: env.TAP_KEY == ''
@@ -108,11 +236,9 @@ jobs:
       - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
 
-      - uses: actions/download-artifact@v8
+      - name: Download the .dmg from the release
         if: env.TAP_KEY != ''
-        with:
-          name: installers-macOS
-          path: dist
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*-macos-universal.dmg' --dir dist
 
       - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
@@ -124,7 +250,7 @@ jobs:
       - name: Update the cask
         if: env.TAP_KEY != ''
         run: |
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${TAG#v}"
           scripts/update-cask.sh "$VER" "dist/azure-devops-board-$VER-macos-universal.dmg" tap/Casks/azure-devops-board.rb
           cd tap
           if git diff --quiet; then echo "Cask already at $VER."; exit 0; fi

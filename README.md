@@ -38,8 +38,8 @@ Homebrew casks are macOS-only. Download the installer from the [GitHub releases]
 
 | OS | File | Note |
 |---|---|---|
-| Windows | `azure-devops-board-<ver>-windows-x64.msi` or `…-setup.exe` | WebView2 ships with Windows 10/11. |
-| Linux | `.deb` (Ubuntu/Debian), `.rpm` (Fedora/RHEL) or `.AppImage` (any distro) | Needs WebKitGTK 4.1 (preinstalled on current GNOME/KDE desktops). |
+| Windows | `azure-devops-board-<ver>-windows-x64-setup.exe` | Per-user install, no admin rights. WebView2 ships with Windows 10/11. |
+| Linux | `azure-devops-board-<ver>-linux-x86_64.AppImage` (any distro; `chmod +x` and run) | Needs WebKitGTK 4.1 (preinstalled on current GNOME/KDE desktops). |
 
 ## First run
 
@@ -108,7 +108,9 @@ Each OS's installer must be built on that OS, so releases are built in CI:
 3. Add a deploy key with **write access** to `homebrew-azure-devops-board`, and store its private key as the repo secret `TAP_DEPLOY_KEY`. Without it, releases still build but the cask is not updated.
 4. Tag and push: `git tag v1.0.0 && git push --tags`.
 
-The workflow builds the macOS universal `.dmg`, Linux `.deb`/`.rpm`/`.AppImage` and Windows `.msi`/`.exe`, attaches them to the release, then sets the new version and sha256 in the cask (`scripts/update-cask.sh`). `azure-pipelines.yml` still builds the same installers as Azure DevOps pipeline artifacts if you prefer that.
+The macOS job runs the tests, builds the universal `.dmg` and a zipped `.app`, and creates the release. The Linux AppImage and the Windows `setup.exe` come from `linux-appimage.yml` and `windows-nsis.yml`, which also run on every pull request as build checks, so a release builds exactly what PRs test. Each platform attaches its own `SHA256SUMS` file, and each publish step checks that its files really landed on the release. The cask job then sets the new version and sha256 in the cask (`scripts/update-cask.sh`). To re-cut an existing tag, run the release workflow by hand from the Actions tab.
+
+Tags must be plain versions like `v1.2.0`. `azure-pipelines.yml` builds the full set of installers (including `.msi`, `.deb` and `.rpm`) as Azure DevOps pipeline artifacts if you need those.
 
 Builds are unsigned. The cask clears the macOS quarantine flag on install, so Homebrew users don't see the Gatekeeper prompt; Windows SmartScreen will still warn once. To sign, see Tauri's [signing guides](https://v2.tauri.app/distribute/sign/).
 
