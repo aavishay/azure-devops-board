@@ -1,0 +1,120 @@
+# Linux AppImage. Pull requests run it as a build check, and release.yml calls it
+# with a tag to produce the release asset, so a release builds exactly what PRs test.
+name: Linux AppImage
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, used to set the version and name the asset. Empty for a build-only check."
+        required: false
+        type: string
+        default: ""
+
+# Read-only: this only produces an artifact. Attaching it to a release is
+# release.yml's job, so a PR run cannot write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04 # oldest available glibc, so the AppImage runs on more distros
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libdbus-1-dev libssl-dev \
+            patchelf build-essential file
+
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Version
+        id: ver
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -n "$TAG" ]; then VER="${TAG#v}"; else VER=$(jq -r .version src-tauri/tauri.conf.json); fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      # Retried because bundling downloads linuxdeploy from GitHub at the very end.
+      # The compile is cached by the first attempt, so a retry only re-bundles.
+      - name: Build the AppImage
+        working-directory: src-tauri
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            if cargo tauri build --bundles appimage --config "{\"version\":\"${{ steps.ver.outputs.ver }}\"}"; then
+              [ "$attempt" -gt 1 ] && echo "::warning::AppImage bundling succeeded on attempt $attempt"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::AppImage bundling failed on attempt $attempt, retrying"
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "::error::AppImage bundling failed three times"
+          exit 1
+
+      - name: Name the asset and checksum it
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BUILT=$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)
+          [ -n "$BUILT" ] || { echo "::error::no AppImage was produced"; exit 1; }
+          ASSET="azure-devops-board-${{ steps.ver.outputs.ver }}-linux-x86_64.AppImage"
+          cp "$BUILT" "dist/$ASSET"
+          cd dist
+          # Its own file: each platform's job uploads one, and the same name would overwrite.
+          sha256sum "$ASSET" | tee SHA256SUMS-linux.txt
+
+      - name: Verify the AppImage is a runnable x86-64 executable
+        run: |
+          set -euo pipefail
+          APP=$(find dist -name '*.AppImage' -print -quit)
+          chmod +x "$APP"
+          DESC=$(file -b "$APP")
+          echo "file: $DESC"
+          case "$DESC" in
+            *ELF*64-bit*x86-64*) ;;
+            *) echo "::error::not an x86-64 ELF: $DESC"; exit 1 ;;
+          esac
+          # Needs no display. Proves the bundle is well-formed, not that the app runs.
+          "$APP" --appimage-offset >/dev/null
+
+      # Two attempts: a failed artifact upload leaves the release without this platform.
+      - uses: actions/upload-artifact@v7
+        id: upload
+        continue-on-error: true
+        with:
+          name: linux-appimage
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Retry the upload
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-appimage
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Say so if the upload needed a retry
+        if: steps.upload.outcome == 'failure'
+        run: echo "::warning::the artifact upload failed once and succeeded on retry"
