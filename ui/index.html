@@ -22,6 +22,7 @@
       <label class="me" for="me">I am
         <select id="me"><option value="">—</option></select>
       </label>
+      <button class="btn" id="newBtn" type="button" title="Create a ticket in Azure DevOps (N)">+ New ticket</button>
       <button class="btn primary" id="refresh" type="button"><span class="spin" aria-hidden="true">↻</span><span id="refreshLabel">Refresh</span></button>
       <a class="btn" id="adoLink" href="#" target="_blank" rel="noopener">Open in Azure DevOps ↗</a>
       <button class="btn" id="accountBtn" type="button"><span class="acct-dot" id="acctDot"></span><span id="accountLabel">Sign in</span></button>
@@ -98,7 +99,7 @@
 
     <section class="opt">
       <h3>Personal Access Token</h3>
-      <p class="muted">Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with scope <b>Work Items (Read)</b>.</p>
+      <p class="muted">Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with scope <b>Work Items (Read &amp; write)</b>. Read is enough if you only view the board.</p>
       <div class="row2">
         <input id="pat" type="password" autocomplete="off" spellcheck="false" placeholder="Paste token">
         <button class="btn" id="patBtn" type="button">Save token</button>
@@ -111,6 +112,32 @@
       <button class="linkbtn danger" id="signOutBtn" type="button" hidden>Sign out</button>
       <span style="flex:1"></span>
       <button class="btn" value="cancel" id="signinClose">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- New ticket -->
+<dialog id="newTicket" aria-labelledby="newTitle">
+  <form method="dialog" class="dlg wide" id="newForm">
+    <h2 id="newTitle">New ticket</h2>
+    <p class="muted" id="newWhere">—</p>
+    <fieldset>
+      <legend>Ticket</legend>
+      <label>Type<select name="type" required></select></label>
+      <label>Priority<select name="priority">
+        <option value="1">1 (highest)</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4 (lowest)</option>
+      </select></label>
+      <label class="span2">Title<input name="title" required maxlength="255" autocomplete="off"></label>
+      <label class="span2"><span id="descLabel">Description</span><textarea name="description" rows="5"></textarea></label>
+      <label>Assigned to<select name="assignedTo"></select></label>
+      <label>Parent<input name="parent" inputmode="numeric" pattern="[0-9]*" list="parentList" autocomplete="off" placeholder="Ticket number (optional)"></label>
+      <datalist id="parentList"></datalist>
+    </fieldset>
+    <p class="err" id="newErr" role="alert" hidden></p>
+    <div class="actions">
+      <span style="flex:1"></span>
+      <button class="btn" id="newCancel" type="button">Cancel</button>
+      <button class="btn primary" id="newSave" type="submit" value="save">Create</button>
     </div>
   </form>
 </dialog>
