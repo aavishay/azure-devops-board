@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Starts a built azure-devops-board, checks that it serves the board and refuses requests
-# without its cookie, then stops it. CI runs this on every platform's build.
+# Starts a built azure-devops-board, checks that it serves the board and refuses API calls
+# without its token, then stops it. CI runs this on every platform's build.
 # Usage: scripts/smoke-test.sh <path-to-azure-devops-board> [port]
 set -euo pipefail
 BIN="${1:?path to the azure-devops-board program}"
@@ -26,20 +26,19 @@ expect() {
   fi
 }
 
-expect "$(code "$BASE/")" 401 "the page without the cookie"
-expect "$(code -X POST "$BASE/api/ping")" 401 "the API without the cookie"
+expect "$(code "$BASE/")" 200 "the page"
+curl -s "$BASE/" | grep -q 'app.js' || { echo "::error::the page isn't the board"; exit 1; }
+expect "$(code -X POST "$BASE/api/ping")" 401 "the API without the token"
 
-# A second run finds this one (an authenticated API call) and prints its address with the token.
-# --port makes it fail instead of starting a second server if it doesn't find it.
-URL=$("$BIN" --no-open --port "$PORT" | grep -o "$BASE/?t=[A-Za-z0-9_-]*") \
+# A second run finds this one (by challenge, without sending the token) and prints its
+# address with the token in the fragment. --port makes it fail instead of starting a
+# second server if it doesn't find it.
+TOKEN=$("$BIN" --no-open --port "$PORT" | grep -o "$BASE/#t=[A-Za-z0-9_-]*" | sed 's/.*#t=//') \
   || { echo "::error::a second run didn't find the running server"; cat "$LOG"; exit 1; }
 
-JAR=$(mktemp)
-expect "$(code -c "$JAR" "$URL")" 303 "the sign-in address"
-expect "$(code -b "$JAR" "$BASE/")" 200 "the page with the cookie"
-curl -s -b "$JAR" "$BASE/" | grep -q 'app.js' || { echo "::error::the page isn't the board"; exit 1; }
-expect "$(code -b "$JAR" -X POST -H 'x-board: 1' "$BASE/api/ping")" 200 "the API with the cookie"
-expect "$(code -b "$JAR" -X POST "$BASE/api/ping")" 403 "the API without its header"
-expect "$(code -b "$JAR" -H "Host: evil.example:$PORT" "$BASE/")" 421 "another host name"
+expect "$(code -X POST -H "x-board: $TOKEN" "$BASE/api/ping")" 200 "the API with the token"
+expect "$(code -X POST -H 'x-board: wrong' "$BASE/api/ping")" 401 "the API with a wrong token"
+expect "$(code -X POST -H "x-board: $TOKEN" -H 'Sec-Fetch-Site: same-site' "$BASE/api/ping")" 403 "a call from another port's page"
+expect "$(code -H "Host: evil.example:$PORT" "$BASE/")" 421 "another host name"
 
-echo "The program starts, serves the board and refuses requests without its cookie."
+echo "The program starts, serves the board and refuses API calls without its token."

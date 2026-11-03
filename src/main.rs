@@ -104,29 +104,41 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     o.open(path)?.write_all(bytes)
 }
 
-/// Asks the server on `port` whether it's this app, signed with our token.
+/// Asks the server on `port` to prove it holds our token, without sending the token:
+/// whatever is listening there now may not be ours.
 async fn is_running(port: u16, token: &str) -> bool {
     let Ok(http) = reqwest::Client::builder().timeout(Duration::from_secs(2)).build() else { return false };
-    let res = http
-        .post(format!("http://127.0.0.1:{port}/api/ping"))
-        .header("cookie", format!("{}={token}", server::COOKIE))
-        .header(server::API_HEADER, "1")
-        .send()
-        .await;
-    match res {
-        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.is_ok_and(|v| v["app"] == "azure-devops-board"),
-        _ => false,
-    }
+    let nonce = auth::random_url_safe(24);
+    let Ok(r) = http.get(format!("http://127.0.0.1:{port}/hello?n={nonce}")).send().await else { return false };
+    r.json::<serde_json::Value>().await.is_ok_and(|v| v["proof"] == server::proof(token, &nonce))
 }
 
-async fn bind(port: Option<u16>) -> Result<TcpListener, String> {
-    match port {
-        Some(p) => TcpListener::bind(("127.0.0.1", p)).await.map_err(|e| format!("Could not listen on port {p}: {e}")),
-        None => match TcpListener::bind(("127.0.0.1", DEFAULT_PORT)).await {
-            Ok(l) => Ok(l),
-            Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Could not open a local port: {e}")),
-        },
+/// Binds the port asked for, or else the last one used (so open tabs and the browser's
+/// remembered filters keep working), then the default, then any free port.
+async fn bind(explicit: Option<u16>, saved: Option<u16>) -> Result<TcpListener, String> {
+    if let Some(p) = explicit {
+        return TcpListener::bind(("127.0.0.1", p)).await.map_err(|e| format!("Could not listen on port {p}: {e}"));
     }
+    for p in saved.into_iter().chain([DEFAULT_PORT]) {
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", p)).await {
+            return Ok(l);
+        }
+    }
+    TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Could not open a local port: {e}"))
+}
+
+/// Serializes startup between runs, so two at once can't both start a server or race on
+/// `server.json`: the second waits, then finds the first. Released when dropped.
+fn startup_lock(data_dir: &Path) -> Result<std::fs::File, String> {
+    let path = data_dir.join("server.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("Could not open {}: {e}", path.display()))?;
+    f.lock().map_err(|e| format!("Could not lock {}: {e}", path.display()))?;
+    Ok(f)
 }
 
 fn open_browser(url: &str) {
@@ -140,6 +152,7 @@ async fn run() -> Result<(), String> {
     let config_dir = dirs::config_dir().ok_or("Could not find your settings folder.")?.join(IDENT);
     let data_dir = dirs::data_dir().ok_or("Could not find your data folder.")?.join(IDENT);
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("Could not create {}: {e}", data_dir.display()))?;
+    let lock = startup_lock(&data_dir)?;
     let mut file = ServerFile::load(data_dir.join("server.json"));
 
     if let Some(port) = file.port.filter(|p| args.port.is_none_or(|want| want == *p)) {
@@ -156,10 +169,11 @@ async fn run() -> Result<(), String> {
     }
 
     let state = Arc::new(AppState::new(&config_dir, &data_dir)?);
-    let listener = bind(args.port).await?;
+    let listener = bind(args.port, file.port).await?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     file.port = Some(port);
     file.save()?;
+    drop(lock); // server.json now names this server, and it accepts connections from here on
     let url = server::launch_url(port, &file.token);
     println!("Azure DevOps Board is running at http://127.0.0.1:{port}");
     println!("Open {url} if your browser doesn't open by itself. Press Ctrl+C to stop.");

@@ -271,13 +271,27 @@
   }
 
   /* ---------- server bridge: POST /api/<command> to the local azure-devops-board server ---------- */
+  // The command opens /#t=<token>. The token is kept in this origin's storage (browsers keep
+  // that per port, unlike cookies), dropped from the address bar, and sent with every call.
+  let TOKEN = store.get("token", "");
+  function takeToken() {
+    const m = location.hash.match(/^#t=([\w-]+)$/);
+    if (!m) return false;
+    TOKEN = m[1];
+    store.set("token", TOKEN);
+    history.replaceState(null, "", location.pathname + location.search);
+    return true;
+  }
+  takeToken();
+  // The same address opened again in this tab only changes the fragment, without a reload.
+  window.addEventListener("hashchange", () => { if (takeToken()) location.reload(); });
   // Failures reject with the server's message string, which the callers show as is.
   async function invoke(cmd, args) {
     let res;
     try {
       res = await fetch(`/api/${cmd}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Board": "1" },
+        headers: { "Content-Type": "application/json", "X-Board": TOKEN },
         body: JSON.stringify(args || {}),
       });
     } catch {

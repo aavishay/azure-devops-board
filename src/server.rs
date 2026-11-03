@@ -1,30 +1,36 @@
 //! The local web server: the embedded UI plus `POST /api/<command>`.
 //!
 //! It listens on 127.0.0.1 only, but any web page open in the browser can still send
-//! requests to localhost, so every request must prove it comes from our own page:
+//! requests to localhost, so API calls must prove they come from our own page:
 //!
-//! * The CLI opens `/?t=<token>`, which sets the token as an HttpOnly, SameSite=Strict
-//!   cookie and redirects to `/`. Requests without that cookie are refused. SameSite=Strict
-//!   means other sites' pages never send it.
-//! * API calls must also carry the `X-Board: 1` header. A cross-site page can only add a
-//!   custom header after a CORS preflight, which this server never approves.
+//! * The CLI opens `/#t=<token>`. The fragment never leaves the browser; the page keeps the
+//!   token in its own localStorage, which browsers isolate per origin (port included), and
+//!   sends it in the `X-Board` header. Nothing is stored in cookies, which browsers share
+//!   between all ports on a host.
+//! * Browsers label requests made by other sites, other ports included, with
+//!   `Sec-Fetch-Site`; only our own page and direct navigation are served.
 //! * The `Host` header must be this server's own address, which defeats DNS rebinding.
+//!
+//! `/hello` lets a second run of the CLI check that this is its own server without
+//! sending the token: it answers a random challenge with an HMAC keyed by the token.
 
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::post;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use hmac::{Hmac, Mac};
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
+use sha2::Sha256;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::app::{self, AppState};
 
-pub const COOKIE: &str = "azure-devops-board";
-/// The header every API call carries; see the module docs.
+/// The header every API call carries the token in.
 pub const API_HEADER: &str = "x-board";
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -43,14 +49,22 @@ pub struct Ctx {
 pub fn router(ctx: Ctx) -> Router {
     Router::new()
         .route("/api/{cmd}", post(api))
+        .route("/hello", get(hello))
         .fallback(page)
         .layer(middleware::from_fn_with_state(ctx.clone(), guard))
         .with_state(ctx)
 }
 
-/// The URL the CLI opens: it signs the browser in to this server.
+/// The URL the CLI opens. The token is in the fragment, so it never reaches a server.
 pub fn launch_url(port: u16, token: &str) -> String {
-    format!("http://127.0.0.1:{port}/?t={token}")
+    format!("http://127.0.0.1:{port}/#t={token}")
+}
+
+/// What `/hello` answers for `nonce`: proof of knowing the token without revealing it.
+pub fn proof(token: &str, nonce: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC takes any key length");
+    mac.update(nonce.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /* ------------------------------------------------------------- the guard */
@@ -63,31 +77,25 @@ async fn guard(State(ctx): State<Ctx>, req: Request, next: Next) -> Response {
     secure_headers(res)
 }
 
-/// Returns the response to send instead when the request is refused or is the
-/// handshake, or `None` to let it through.
+/// Returns the response to send instead when the request is refused, or `None` to let it through.
 fn check(ctx: &Ctx, req: &Request) -> Option<Response> {
     let h = req.headers();
     if !host_ok(h, ctx.port) {
         return Some((StatusCode::MISDIRECTED_REQUEST, "Unknown host.").into_response());
     }
-    // The handshake: /?t=<token> sets the cookie, then drops the token from the address bar.
-    if req.method() == Method::GET && req.uri().path() == "/" {
-        if let Some(t) = query_param(req.uri().query().unwrap_or(""), "t") {
-            if !same(&t, &ctx.token) {
-                return Some(not_signed_in(false));
-            }
-            let mut r = Redirect::to("/").into_response();
-            let cookie = format!("{COOKIE}={}; Path=/; HttpOnly; SameSite=Strict", ctx.token);
-            r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).expect("the token is URL-safe"));
-            return Some(r);
+    // "same-origin" is our own page, "none" a navigation the user or the CLI started.
+    // Pages on other sites, and on other ports of this computer, get "same-site" or "cross-site".
+    if !matches!(h.get("sec-fetch-site").map(HeaderValue::as_bytes), None | Some(b"same-origin") | Some(b"none")) {
+        return Some((StatusCode::FORBIDDEN, "Request refused.").into_response());
+    }
+    if req.uri().path().starts_with("/api/") {
+        let token = h.get(API_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !same(token, &ctx.token) {
+            return Some((StatusCode::UNAUTHORIZED, Json(json!({ "error": "This tab isn't connected to the board. Run azure-devops-board to open it again." }))).into_response());
         }
-    }
-    let is_api = req.uri().path().starts_with("/api/");
-    if !cookie_of(h).is_some_and(|c| same(&c, &ctx.token)) {
-        return Some(not_signed_in(is_api));
-    }
-    if is_api && (h.get(API_HEADER).map(|v| v.as_bytes()) != Some(b"1") || !origin_ok(h, ctx.port)) {
-        return Some((StatusCode::FORBIDDEN, Json(json!({ "error": "Request refused." }))).into_response());
+        if !origin_ok(h, ctx.port) {
+            return Some((StatusCode::FORBIDDEN, Json(json!({ "error": "Request refused." }))).into_response());
+        }
     }
     None
 }
@@ -105,31 +113,9 @@ fn origin_ok(h: &HeaderMap, port: u16) -> bool {
     }
 }
 
-fn cookie_of(h: &HeaderMap) -> Option<String> {
-    h.get_all(header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == COOKIE)
-        .map(|(_, v)| v.to_string())
-}
-
-fn query_param(q: &str, name: &str) -> Option<String> {
-    url::form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == name).map(|(_, v)| v.into_owned())
-}
-
 /// Compares in constant time, so the token can't be guessed byte by byte.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-fn not_signed_in(api: bool) -> Response {
-    if api {
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "This tab is no longer connected. Run azure-devops-board again to reopen the board." }))).into_response();
-    }
-    let body = "<!doctype html><meta charset=utf-8><title>Azure DevOps Board</title><body style=\"font:16px system-ui;display:grid;place-items:center;height:90vh;color:#16212a\"><div style=\"max-width:460px;text-align:center\"><p>Open the board by running <code>azure-devops-board</code> in a terminal.</p></div>";
-    (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
 }
 
 fn secure_headers(mut res: Response) -> Response {
@@ -153,6 +139,13 @@ async fn page(req: Request) -> Response {
     match Ui::get(path) {
         Some(f) => ([(header::CONTENT_TYPE, f.metadata.mimetype().to_string())], Body::from(f.data.into_owned())).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn hello(State(ctx): State<Ctx>, Query(q): Query<HashMap<String, String>>) -> Response {
+    match q.get("n").filter(|n| (16..=128).contains(&n.len())) {
+        Some(n) => Json(json!({ "app": "azure-devops-board", "proof": proof(&ctx.token, n) })).into_response(),
+        None => StatusCode::BAD_REQUEST.into_response(),
     }
 }
 
@@ -205,8 +198,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let app = router(Ctx { state, token: TOKEN.into(), port });
         tokio::spawn(async move { axum::serve(listener, app).await });
-        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        (port, http)
+        (port, reqwest::Client::new())
     }
 
     fn unique_id() -> String {
@@ -216,39 +208,25 @@ mod tests {
             .collect()
     }
 
-    fn signed_in() -> String {
-        format!("{COOKIE}={TOKEN}")
+    #[test]
+    fn launch_url_keeps_the_token_in_the_fragment() {
+        assert_eq!(launch_url(47180, "abc"), "http://127.0.0.1:47180/#t=abc");
     }
 
     #[tokio::test]
-    async fn handshake_sets_a_strict_cookie() {
+    async fn page_is_served_with_strict_headers() {
         let (port, http) = start().await;
-        let r = http.get(launch_url(port, TOKEN)).send().await.unwrap();
-        assert_eq!(r.status(), 303);
-        assert_eq!(r.headers()["location"], "/");
-        let cookie = r.headers()["set-cookie"].to_str().unwrap();
-        assert!(cookie.starts_with(&signed_in()) && cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
-
-        let wrong = http.get(launch_url(port, "nope")).send().await.unwrap();
-        assert_eq!(wrong.status(), 401);
-        assert!(wrong.headers().get("set-cookie").is_none());
-    }
-
-    #[tokio::test]
-    async fn page_needs_the_cookie() {
-        let (port, http) = start().await;
-        let url = format!("http://127.0.0.1:{port}/");
-        assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
-        let r = http.get(&url).header("cookie", signed_in()).send().await.unwrap();
+        let r = http.get(format!("http://127.0.0.1:{port}/")).send().await.unwrap();
         assert_eq!(r.status(), 200);
         assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+        assert_eq!(r.headers()["referrer-policy"], "no-referrer");
         assert!(r.text().await.unwrap().contains("app.js"));
-        let js = http.get(format!("{url}app.js")).header("cookie", signed_in()).send().await.unwrap();
+        let js = http.get(format!("http://127.0.0.1:{port}/app.js")).header("sec-fetch-site", "same-origin").send().await.unwrap();
         assert!(js.headers()["content-type"].to_str().unwrap().contains("javascript"));
     }
 
     #[tokio::test]
-    async fn api_needs_cookie_header_and_own_origin() {
+    async fn api_needs_the_token_and_own_origin() {
         let (port, http) = start().await;
         let ping = format!("http://127.0.0.1:{port}/api/ping");
         let post = |h: &[(&str, String)]| {
@@ -258,29 +236,50 @@ mod tests {
             }
             r.send()
         };
-        assert_eq!(post(&[(API_HEADER, "1".into())]).await.unwrap().status(), 401);
-        assert_eq!(post(&[("cookie", signed_in())]).await.unwrap().status(), 403);
-        let evil = [("cookie", signed_in()), (API_HEADER, "1".into()), ("origin", "https://evil.example".into())];
-        assert_eq!(post(&evil).await.unwrap().status(), 403);
-        let ok = post(&[("cookie", signed_in()), (API_HEADER, "1".into()), ("origin", format!("http://127.0.0.1:{port}"))]).await.unwrap();
+        assert_eq!(post(&[]).await.unwrap().status(), 401);
+        assert_eq!(post(&[(API_HEADER, "wrong".into())]).await.unwrap().status(), 401);
+        assert_eq!(post(&[(API_HEADER, TOKEN.into()), ("origin", "https://evil.example".into())]).await.unwrap().status(), 403);
+        let ok = post(&[(API_HEADER, TOKEN.into()), ("origin", format!("http://127.0.0.1:{port}"))]).await.unwrap();
         assert_eq!(ok.status(), 200);
         assert_eq!(ok.json::<Value>().await.unwrap()["app"], "azure-devops-board");
+    }
+
+    #[tokio::test]
+    async fn refuses_other_sites_and_ports() {
+        // A page on another port of this computer is "same-site"; one elsewhere is "cross-site".
+        let (port, http) = start().await;
+        for site in ["same-site", "cross-site"] {
+            let page = http.get(format!("http://127.0.0.1:{port}/workstreams.js")).header("sec-fetch-site", site).send().await.unwrap();
+            assert_eq!(page.status(), 403, "{site} page");
+            let api = http.post(format!("http://127.0.0.1:{port}/api/ping")).header(API_HEADER, TOKEN).header("sec-fetch-site", site).send().await.unwrap();
+            assert_eq!(api.status(), 403, "{site} API call");
+        }
     }
 
     #[tokio::test]
     async fn rejects_other_hosts() {
         // What a DNS-rebinding page would send: our port, its own host name.
         let (port, http) = start().await;
-        let r = http.get(format!("http://127.0.0.1:{port}/")).header("host", format!("evil.example:{port}")).header("cookie", signed_in()).send().await.unwrap();
+        let r = http.get(format!("http://127.0.0.1:{port}/")).header("host", format!("evil.example:{port}")).send().await.unwrap();
         assert_eq!(r.status(), 421);
+    }
+
+    #[tokio::test]
+    async fn hello_proves_the_token_without_sending_it() {
+        let (port, http) = start().await;
+        let nonce = "0123456789abcdefghij";
+        let r = http.get(format!("http://127.0.0.1:{port}/hello?n={nonce}")).send().await.unwrap();
+        let body = r.json::<Value>().await.unwrap();
+        assert_eq!(body["proof"], proof(TOKEN, nonce));
+        assert_ne!(proof("another-token", nonce), proof(TOKEN, nonce));
+        assert!(!body.to_string().contains(TOKEN));
+        assert_eq!(http.get(format!("http://127.0.0.1:{port}/hello?n=short")).send().await.unwrap().status(), 400);
     }
 
     #[tokio::test]
     async fn commands_answer_json() {
         let (port, http) = start().await;
-        let call = |cmd: &str, body: Value| {
-            http.post(format!("http://127.0.0.1:{port}/api/{cmd}")).header("cookie", signed_in()).header(API_HEADER, "1").json(&body).send()
-        };
+        let call = |cmd: &str, body: Value| http.post(format!("http://127.0.0.1:{port}/api/{cmd}")).header(API_HEADER, TOKEN).json(&body).send();
         let board = call("load_board", json!({})).await.unwrap();
         assert_eq!(board.status(), 200);
         assert_eq!(board.json::<Value>().await.unwrap()["configured"], false);

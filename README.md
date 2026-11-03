@@ -18,7 +18,7 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 | **Changes** | An Added tag for the last 24 hours, plus a Recent changes log kept on this computer. |
 | **Refresh** | Automatic every 10 minutes (configurable). Also when you return to the tab and the data is stale, and on demand with Refresh or Cmd/Ctrl+R. |
 | **Sign-in** | **Sign in with Microsoft** (Entra ID, browser-based, with automatic token renewal), or a **Personal Access Token**. |
-| **Security** | Credentials live in the OS keychain. The local server only accepts requests from the tab it opened (see *Security*). |
+| **Security** | Credentials live in the OS keychain. The local server only answers the tab it opened (see *Security*). |
 
 ## Install
 
@@ -56,11 +56,11 @@ The board opens in your default browser. Leave the terminal open while you use i
 
 | Option | |
 |---|---|
-| `-p`, `--port <port>` | Listen on this port. The default is `47180`, or any free port if that one is taken. |
+| `-p`, `--port <port>` | Listen on this port. Without it, the board reuses the port it used last time, then tries `47180`, then any free port. |
 | `--no-open` | Don't open the browser; just print the address. |
 | `-h`, `--help` / `-V`, `--version` | Show help or the version. |
 
-Your filters and other view choices are remembered by the browser for that address, so keeping the default port keeps them.
+Your filters and other view choices are remembered by the browser for that address, which is why the board keeps using the same port.
 
 ## First run
 
@@ -93,11 +93,13 @@ The sign-in uses the OAuth 2.0 authorization-code flow with PKCE and a loopback 
 
 ## Security
 
-The server listens on `127.0.0.1` only, so nothing else on the network can reach it. Web pages open in your browser can still send requests to localhost, so every request must also prove it comes from the board's own tab:
+The server listens on `127.0.0.1` only, so nothing else on the network can reach it. Web pages open in your browser can still send requests to localhost, so the board's API only answers its own tab:
 
-- The command opens a one-time address that sets a secret token as an `HttpOnly`, `SameSite=Strict` cookie, then removes the token from the address bar. Other sites' pages never send that cookie.
-- API calls must also carry a custom header, which another site can only add with permission this server never gives.
+- The command opens the board with a secret token in the address's `#` fragment, which browsers never send to any server. The page keeps the token in its own storage, which browsers keep separate for each port, and sends it with every API call. No cookies are used, because browsers share cookies between all ports on `127.0.0.1`.
+- Requests that the browser marks as coming from another site, including another port on this computer, are refused.
 - The `Host` header must be the server's own address, which blocks DNS-rebinding attacks.
+- When you run the command again, it checks for a running board by asking it to prove it knows the token (a challenge answered with an HMAC). The token itself is never sent, so a program that took over the old port learns nothing.
+- Startup takes a lock, so two runs at the same moment start one server, not two.
 
 The token is kept in `server.json` (readable only by you), so an open tab keeps working after you restart the command.
 
@@ -108,7 +110,7 @@ The token is kept in `server.json` (readable only by you), so an open tab keeps 
 | Settings | `settings.json` in the config folder: `%APPDATA%\com.au10tix.devopsboard` (Windows), `~/Library/Application Support/com.au10tix.devopsboard` (macOS), `~/.config/com.au10tix.devopsboard` (Linux) |
 | PAT / refresh token | OS credential store: Windows Credential Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring / KWallet). If no keyring is running on Linux, it falls back to `credentials.fallback.json` with `0600` permissions. |
 | Board snapshot + change log | `board/` in the data folder (the same as the config folder on Windows and macOS, `~/.local/share/com.au10tix.devopsboard` on Linux) |
-| Server port and browser token | `server.json` in the data folder |
+| Server port and browser token | `server.json` (and its `server.lock`) in the data folder |
 
 **Sign out** removes the saved credentials from this computer.
 
@@ -144,7 +146,8 @@ Builds are unsigned. Homebrew installs don't trigger Gatekeeper. If you download
 ## Testing
 
 ```sh
-cargo test                                     # server security, change tracking, sign-in, name parsing
+cargo test                                     # server checks, change tracking, sign-in, name parsing
+scripts/smoke-test.sh target/debug/azure-devops-board  # start the program and check what it serves
 MOCK_ADO_URL=http://127.0.0.1:9090 cargo test  # also exercises the Azure DevOps client against a fake server
 ```
 
