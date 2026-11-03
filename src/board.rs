@@ -258,7 +258,7 @@ pub struct Ado<'a> {
 }
 
 impl Ado<'_> {
-    async fn call(&self, method: reqwest::Method, url: String, body: Option<Value>) -> Result<Value, String> {
+    pub(crate) async fn call(&self, method: reqwest::Method, url: String, body: Option<Value>) -> Result<Value, String> {
         let mut req = self.http.request(method, &url);
         if let Some(b) = body {
             req = req.json(&b);
@@ -266,7 +266,7 @@ impl Ado<'_> {
         self.send(req).await
     }
 
-    async fn send(&self, req: reqwest::RequestBuilder) -> Result<Value, String> {
+    pub(crate) async fn send(&self, req: reqwest::RequestBuilder) -> Result<Value, String> {
         let res = req.header("Authorization", &self.auth).header("Accept", "application/json").send().await.map_err(|e| {
             if e.is_timeout() {
                 "Azure DevOps did not answer within 30 seconds.".to_string()
@@ -301,7 +301,7 @@ impl Ado<'_> {
         Ok(name)
     }
 
-    async fn batch(&self, ids: &[u64], fields: &[&str]) -> Result<Vec<Value>, String> {
+    pub(crate) async fn batch(&self, ids: &[u64], fields: &[&str]) -> Result<Vec<Value>, String> {
         let mut out = Vec::new();
         for part in ids.chunks(200) {
             let v = self
@@ -439,13 +439,7 @@ impl Ado<'_> {
             .post(format!("{}/wit/workitems/${}?api-version=7.1", s.project_api(), crate::settings::enc(&ty.name)))
             .header("Content-Type", "application/json-patch+json")
             .body(Value::Array(ops).to_string());
-        let w = self.send(req).await.map_err(|e| {
-            if e.starts_with("Unauthorized") {
-                "Azure DevOps didn't allow creating it. A Personal Access Token needs the Work Items (Read & write) scope; create a new one in Sign in.".to_string()
-            } else {
-                e
-            }
-        })?;
+        let w = self.send(req).await.map_err(write_error)?;
         let id = w["id"].as_u64().ok_or("Azure DevOps didn't return the new ticket's number.")?;
         Ok(Created { id, title: t.title.trim().to_string(), url: s.edit_url(id) })
     }
@@ -507,7 +501,16 @@ fn create_ops(t: &NewTicket, ty: &TicketType, area_path: &str, org_url: &str) ->
     ops
 }
 
-fn text_to_html(s: &str) -> String {
+/// Explains a refused change: usually a token made with Work Items (Read) only.
+pub(crate) fn write_error(e: String) -> String {
+    if e.starts_with("Unauthorized") {
+        "Azure DevOps didn't allow the change. A Personal Access Token needs the Work Items (Read & write) scope; create a new one in Sign in.".into()
+    } else {
+        e
+    }
+}
+
+pub(crate) fn text_to_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -536,7 +539,7 @@ fn duplicate_map(r: &Value) -> HashMap<u64, u64> {
         .unwrap_or_default()
 }
 
-fn owner_of(v: &Value) -> (Option<String>, Option<String>) {
+pub(crate) fn owner_of(v: &Value) -> (Option<String>, Option<String>) {
     let full = match v {
         Value::String(s) => s.clone(),
         Value::Object(_) => v["displayName"].as_str().or_else(|| v["uniqueName"].as_str()).unwrap_or("").to_string(),
