@@ -49,7 +49,7 @@ fn authority(s: &Settings) -> String {
     format!("https://login.microsoftonline.com/{}/oauth2/v2.0", s.tenant_id)
 }
 
-fn random_url_safe(bytes: usize) -> String {
+pub fn random_url_safe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
