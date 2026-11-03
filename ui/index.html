@@ -99,7 +99,7 @@
 
     <section class="opt">
       <h3>Personal Access Token</h3>
-      <p class="muted">Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with scope <b>Work Items (Read &amp; write)</b>. Read is enough if you only view the board.</p>
+      <p class="muted">Create one in Azure DevOps under <b>User settings → Personal access tokens</b> with scope <b>Work Items (Read &amp; write)</b>. Read is enough if you only view the board and tickets.</p>
       <div class="row2">
         <input id="pat" type="password" autocomplete="off" spellcheck="false" placeholder="Paste token">
         <button class="btn" id="patBtn" type="button">Save token</button>
@@ -114,6 +114,11 @@
       <button class="btn" value="cancel" id="signinClose">Close</button>
     </div>
   </form>
+</dialog>
+
+<!-- Ticket panel: filled by app.js -->
+<dialog id="ticket" class="tk-dlg" aria-label="Ticket">
+  <div class="dlg wide tk" id="tk"></div>
 </dialog>
 
 <!-- New ticket -->

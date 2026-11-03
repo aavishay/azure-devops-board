@@ -113,12 +113,12 @@
       : "";
     const par = t.parent ? PARENTS[t.parent] : null;
     const parentLine = t.parent
-      ? `<div class="parent">↳ <a href="${esc(par?.url || "#")}" target="_blank" rel="noopener">#${esc(t.parent)}</a> ${esc(par?.title || "Parent PBI")}${par?.state ? ` <span class="ps">(${esc(par.state)})</span>` : ""}</div>`
+      ? `<div class="parent">↳ <a href="${esc(par?.url || "#")}" target="_blank" rel="noopener" data-ticket="${esc(t.parent)}">#${esc(t.parent)}</a> ${esc(par?.title || "Parent PBI")}${par?.state ? ` <span class="ps">(${esc(par.state)})</span>` : ""}</div>`
       : "";
     const dupLines = t.dups.map((d) =>
-      `<div class="dup" title="Linked in Azure DevOps as a duplicate of #${esc(t.id)}">Duplicate <a href="${esc(d.url)}" target="_blank" rel="noopener">#${esc(d.id)}</a> ${esc(d.title)}${d.rawState !== t.rawState ? ` <span class="ps">(${esc(d.rawState)})</span>` : ""}</div>`).join("");
-    return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}">
-      <div class="tab"><a class="id" href="${esc(t.url)}" target="_blank" rel="noopener" aria-label="Open #${esc(t.id)} in Azure DevOps">${esc(t.id)}</a><span class="kind">${esc(t.type)}</span>${flags}<span class="pri${t.p === 1 ? " p1" : ""}" title="Priority ${esc(t.p)}">P${esc(t.p)}</span></div>
+      `<div class="dup" title="Linked in Azure DevOps as a duplicate of #${esc(t.id)}">Duplicate <a href="${esc(d.url)}" target="_blank" rel="noopener" data-ticket="${esc(d.id)}">#${esc(d.id)}</a> ${esc(d.title)}${d.rawState !== t.rawState ? ` <span class="ps">(${esc(d.rawState)})</span>` : ""}</div>`).join("");
+    return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}" data-ticket="${esc(t.id)}" tabindex="0" aria-label="Open #${esc(t.id)}: ${esc(t.title)}">
+      <div class="tab"><a class="id" href="${esc(t.url)}" target="_blank" rel="noopener" data-ticket="${esc(t.id)}" title="Open here; Cmd/Ctrl-click opens Azure DevOps">${esc(t.id)}</a><span class="kind">${esc(t.type)}</span>${flags}<span class="pri${t.p === 1 ? " p1" : ""}" title="Priority ${esc(t.p)}">P${esc(t.p)}</span></div>
       <div class="body">
         <div class="title">${esc(t.title)}</div>
         ${dupLines}${parentLine}
@@ -223,7 +223,7 @@
       : "";
     $("history").innerHTML = h.map((c) => {
       const url = ALL.find((t) => t.id === c.id)?.url || (BOARD.boardUrl.replace(/_boards.*$/, "") + "_workitems/edit/" + c.id);
-      return `<li><time>${esc(fmt(c.at))}</time><a class="hid" href="${esc(url)}" target="_blank" rel="noopener">#${esc(c.id)}</a><span class="what ${esc(c.kind)}">${what(c)}</span><span class="tt" title="${esc(c.title)}">${esc(c.title)}</span></li>`;
+      return `<li><time>${esc(fmt(c.at))}</time><a class="hid" href="${esc(url)}" target="_blank" rel="noopener" data-ticket="${esc(c.id)}">#${esc(c.id)}</a><span class="what ${esc(c.kind)}">${what(c)}</span><span class="tt" title="${esc(c.title)}">${esc(c.title)}</span></li>`;
     }).join("");
   }
 
@@ -341,7 +341,7 @@
 
   let refreshAgain = null; // a refresh asked for while one runs, that must not be dropped
   async function refresh(reason = "manual") {
-    if (refreshing) { if (reason === "created") refreshAgain = reason; return; }
+    if (refreshing) { if (reason === "created" || reason === "edited") refreshAgain = reason; return; }
     refreshing = true;
     const btn = $("refresh");
     btn.disabled = true; btn.classList.add("busy"); $("refreshLabel").textContent = "Refreshing…";
@@ -448,6 +448,19 @@
   // "Alex Doe (Contractor)" and "Alex Doe <alex@…>" are both Alex Doe, as the server cleans owners.
   const plainName = (n) => String(n || "").replace(/[(<][^)>]*[)>]/g, "").replace(/\s+/g, " ").trim();
 
+  /** [value, label] pairs: Unassigned, you, then everyone on the board, by the sign-in
+   *  name that assigns to them unambiguously. `extra` ({name, unique}) is added if missing. */
+  function peopleOptions(extra) {
+    const people = new Map();
+    for (const t of ALL) if (t.ownerFull) people.set(t.ownerFull, t.ownerUnique || t.ownerFull);
+    if (extra?.name && !people.has(extra.name)) people.set(extra.name, extra.unique || extra.name);
+    const mine = plainName(BOARD?.user);
+    const meValue = people.get(mine) || BOARD?.user || "";
+    people.delete(mine);
+    return [["", "Unassigned"], ...(meValue ? [[meValue, `Me (${mine})`]] : []),
+      ...[...people].sort(([a], [b]) => a.localeCompare(b)).map(([n, v]) => [v, n])];
+  }
+
   function fillTypes() {
     const sel = $("newForm").elements.namedItem("type");
     const want = [store.get("newType", ""), ...DEFAULT_TYPES].find((n) => TYPES.some((t) => t.name === n)) || TYPES[0]?.name;
@@ -470,14 +483,7 @@
     showErr("newErr", "");
     $("newWhere").textContent = `It goes to ${BOARD.subtitle.replace(/ · Azure Boards$/, "")}, so it shows on this board.`;
 
-    // People on the board, by the sign-in name that assigns to them unambiguously.
-    const people = new Map();
-    for (const t of ALL) if (t.ownerFull) people.set(t.ownerFull, t.ownerUnique || t.ownerFull);
-    const mine = plainName(BOARD.user);
-    const meValue = people.get(mine) || BOARD.user || "";
-    people.delete(mine);
-    const opts = [["", "Unassigned"], ...(meValue ? [[meValue, `Me (${mine})`]] : []),
-      ...[...people].sort(([a], [b]) => a.localeCompare(b)).map(([n, v]) => [v, n])];
+    const opts = peopleOptions();
     const who = form.elements.namedItem("assignedTo");
     who.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
     const lastWho = store.get("newAssignee", "");
@@ -523,6 +529,171 @@
     } catch (e) {
       showErr("newErr", String(e?.message || e));
     } finally { btn.disabled = false; btn.textContent = "Create"; }
+  }
+
+  /* ---------- ticket panel ---------- */
+  // Azure DevOps rich text is HTML written by anyone with access to the project, so only
+  // plain formatting is rebuilt from it: no attributes but link targets, no images (the
+  // page's policy blocks other sites' images anyway; they become links), no scripts or forms.
+  const RICH = new Set(["P", "BR", "DIV", "SPAN", "B", "STRONG", "I", "EM", "U", "S", "STRIKE", "DEL", "SUB", "SUP", "UL", "OL", "LI",
+    "CODE", "PRE", "BLOCKQUOTE", "TABLE", "THEAD", "TBODY", "TFOOT", "TR", "TD", "TH", "HR"]);
+  const DROP = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "IFRAME", "FRAME", "OBJECT", "EMBED", "SVG", "MATH", "FORM",
+    "INPUT", "BUTTON", "SELECT", "TEXTAREA", "LINK", "META", "TITLE", "HEAD", "AUDIO", "VIDEO", "CANVAS"]);
+  function webUrl(u) {
+    try { const x = new URL(u || "", "invalid:/"); return x.protocol === "https:" || x.protocol === "http:" ? x.href : null; } catch { return null; }
+  }
+  function rich(html) {
+    // A DOMParser document is inert: nothing in it runs or loads.
+    const src = new DOMParser().parseFromString(String(html || ""), "text/html").body;
+    const out = document.createDocumentFragment();
+    const link = (href, fill) => { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; fill(a); return a; };
+    const walk = (from, to) => {
+      for (const n of from.childNodes) {
+        if (n.nodeType === Node.TEXT_NODE) { to.append(n.textContent); continue; }
+        if (n.nodeType !== Node.ELEMENT_NODE || DROP.has(n.tagName)) continue;
+        const tag = n.tagName;
+        if (tag === "A") { const href = webUrl(n.getAttribute("href")); if (href) to.append(link(href, (a) => walk(n, a))); else walk(n, to); }
+        else if (tag === "IMG") { const href = webUrl(n.getAttribute("src")); if (href) to.append(link(href, (a) => { a.textContent = `[image${n.alt ? ": " + n.alt : ""}]`; })); }
+        else if (/^H[1-6]$/.test(tag)) { const d = document.createElement("div"); d.className = "rh"; walk(n, d); to.append(d); }
+        else if (RICH.has(tag)) {
+          const el = document.createElement(tag);
+          for (const k of ["colspan", "rowspan"]) { const v = parseInt(n.getAttribute(k), 10); if (v > 1 && v < 100) el.setAttribute(k, v); }
+          walk(n, el); to.append(el);
+        } else walk(n, to); // unknown tags keep their text
+      }
+    };
+    walk(src, out);
+    return out;
+  }
+
+  let TK = null;           // the ticket on show
+  const tkBack = [];        // ids to go back to, from opening linked tickets
+  const tkKind = (type) => ({ Incident: "incident", "Product Backlog Item": "pbi", PBI: "pbi", Task: "task", Bug: "bug" }[type] || "other");
+  const tkLink = (l) => `<li><button class="linkbtn" type="button" data-ticket="${esc(l.id)}">#${esc(l.id)}</button> <span class="tk-kind">${esc(l.type)}</span> ${esc(l.title)}${l.state ? ` <span class="ps">(${esc(l.state)})</span>` : ""}</li>`;
+
+  async function openTicket(id, { push = false, keepBack = false } = {}) {
+    const dlg = $("ticket");
+    if (push && TK && TK.id !== id) tkBack.push(TK.id);
+    else if (!push && !keepBack) tkBack.length = 0;
+    TK = { id, loading: true };
+    $("tk").innerHTML = `<div class="tk-top"><span class="tk-id">#${esc(id)}</span><span style="flex:1"></span><button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button></div><p class="muted">Loading #${esc(id)} from Azure DevOps…</p>`;
+    if (!dlg.open) dlg.showModal();
+    try {
+      const t = await invoke("ticket", { id });
+      if (TK?.id === id) renderTicket(t);
+    } catch (e) {
+      if (TK?.id !== id) return;
+      const url = ALL.find((x) => x.id === id)?.url;
+      $("tk").querySelector("p").outerHTML = `<p class="err">Could not open #${esc(id)}. ${esc(e?.message || e)}</p>${url ? `<p><a href="${esc(url)}" target="_blank" rel="noopener">Open it in Azure DevOps ↗</a></p>` : ""}`;
+    }
+  }
+
+  function renderTicket(t, note = "") {
+    TK = t;
+    const states = t.states.map((s) => `<option${s.name === t.state ? " selected" : ""}>${esc(s.name)}</option>`).join("");
+    const people = peopleOptions(t.assignedTo);
+    const curWho = t.assignedTo ? (people.find(([v, l]) => v === t.assignedTo.unique || l === t.assignedTo.name || l === `Me (${t.assignedTo.name})`)?.[0] ?? "") : "";
+    const who = people.map(([v, l]) => `<option value="${esc(v)}"${v === curWho ? " selected" : ""}>${esc(l)}</option>`).join("");
+    const prio = [1, 2, 3, 4].map((p) => `<option value="${p}"${p === t.priority ? " selected" : ""}>${p}</option>`).join("");
+    const when = (at) => (at ? esc(fmt(at)) : "");
+    const meta = [
+      ["Area", esc(t.area)], ["Iteration", esc(t.iteration)],
+      ...(t.tags.length ? [["Tags", t.tags.map((g) => `<span class="tag">${esc(g)}</span>`).join(" ")]] : []),
+      ["Created", `${esc(t.createdBy || "")}${t.createdAt ? " · " + when(t.createdAt) : ""}`],
+      ["Changed", `${esc(t.changedBy || "")}${t.changedAt ? " · " + when(t.changedAt) : ""}`],
+    ];
+    const hist = t.history.map((h) => `<li><time>${when(h.at)}</time><span class="who">${esc(h.by)}</span><span>${h.created ? "Created it"
+      : h.changes.map((c) => `${esc(c.field)}: ${esc(c.from ?? "—")} → ${esc(c.to ?? "—")}`).join("; ")}</span></li>`).join("");
+    $("tk").innerHTML = `
+      <div class="tk-top">
+        ${tkBack.length ? `<button class="btn" type="button" data-tk="back" title="Back to #${esc(tkBack[tkBack.length - 1])}">← #${esc(tkBack[tkBack.length - 1])}</button>` : ""}
+        <span class="tk-kind k-${tkKind(t.type)}">${esc(t.type)}</span><span class="tk-id">#${esc(t.id)}</span>
+        <span style="flex:1"></span>
+        <a class="btn" href="${esc(t.url)}" target="_blank" rel="noopener">Open in Azure DevOps ↗</a>
+        <button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button>
+      </div>
+      <h2 class="tk-title" id="tkTitle">${esc(t.title)}</h2>
+      <div class="tk-edit">
+        <label>State<select data-f="state">${states}</select></label>
+        <label>Assigned to<select data-f="assignedTo">${who}</select></label>
+        ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
+        <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
+      </div>
+      <p class="err" id="tkErr" role="alert" hidden></p>
+      ${note ? `<p class="tk-note" role="status">${esc(note)}</p>` : ""}
+      ${t.missing.length ? `<p class="hint">Couldn't load ${esc(t.missing.join(", "))} from Azure DevOps.</p>` : ""}
+      <dl class="tk-meta">${meta.map(([k, v]) => `<div><dt>${k}</dt><dd>${v || "—"}</dd></div>`).join("")}</dl>
+      <div id="tkSections"></div>
+      ${t.parent ? `<h3>Parent</h3><ul class="tk-links">${tkLink(t.parent)}</ul>` : ""}
+      ${t.children.length ? `<h3>Children <span class="n">${t.children.length}</span></h3><ul class="tk-links">${t.children.map(tkLink).join("")}</ul>` : ""}
+      <h3>Discussion <span class="n">${t.comments.length || ""}</span></h3>
+      <div class="tk-comment"><textarea id="tkComment" rows="3" placeholder="Add a comment"></textarea><button class="btn" type="button" data-tk="comment">Comment</button></div>
+      <ul class="tk-comments" id="tkComments"></ul>
+      ${hist ? `<h3>History</h3><ul class="tk-history">${hist}</ul>` : ""}`;
+    // Rich text goes in as rebuilt nodes, never as HTML strings.
+    const sec = $("tkSections");
+    for (const s of t.sections) {
+      const h = document.createElement("h3"); h.textContent = s.label;
+      const d = document.createElement("div"); d.className = "rich"; d.append(rich(s.html));
+      sec.append(h, d);
+    }
+    if (!t.sections.length) sec.innerHTML = `<p class="muted">No description.</p>`;
+    const cl = $("tkComments");
+    for (const c of t.comments) {
+      const li = document.createElement("li");
+      li.innerHTML = `<div class="tk-c-head"><b>${esc(c.author)}</b><time>${when(c.at)}</time></div>`;
+      const d = document.createElement("div"); d.className = "rich"; d.append(rich(c.html));
+      li.append(d); cl.append(li);
+    }
+    $("ticket").setAttribute("aria-labelledby", "tkTitle");
+  }
+
+  const tkField = (f) => $("tk").querySelector(`[data-f="${f}"]`);
+  function tkChanges() {
+    if (!TK || TK.loading) return {};
+    const out = {};
+    const st = tkField("state")?.value;
+    if (st && st !== TK.state) out.state = st;
+    const who = tkField("assignedTo");
+    const was = [...who.options].find((o) => o.defaultSelected)?.value ?? "";
+    if (who.value !== was) out.assignedTo = who.value;
+    const p = tkField("priority");
+    if (p && p.value && Number(p.value) !== TK.priority) out.priority = Number(p.value);
+    return out;
+  }
+  function tkDirty() { $("tk").querySelector(".tk-save").hidden = !Object.keys(tkChanges()).length; }
+
+  async function tkSave() {
+    const changes = tkChanges();
+    if (!Object.keys(changes).length) return;
+    const btn = $("tk").querySelector('[data-tk="save"]'); btn.disabled = true; btn.textContent = "Saving…";
+    showErr("tkErr", "");
+    try {
+      renderTicket(await invoke("update_ticket", { edit: { id: TK.id, rev: TK.rev, ...changes } }), "Saved.");
+      refresh("edited");
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (msg.startsWith("Someone changed")) {
+        try { renderTicket(await invoke("ticket", { id: TK.id })); } catch {}
+      } else { btn.disabled = false; btn.textContent = "Save changes"; }
+      showErr("tkErr", msg);
+    }
+  }
+
+  async function tkComment() {
+    const box = $("tkComment"), text = box.value.trim();
+    if (!text) return box.focus();
+    const btn = $("tk").querySelector('[data-tk="comment"]'); btn.disabled = true; btn.textContent = "Posting…";
+    showErr("tkErr", "");
+    try {
+      const keep = tkChanges(); // a pending edit survives posting a comment
+      renderTicket(await invoke("add_comment", { id: TK.id, text }), "Comment added.");
+      for (const [k, v] of Object.entries(keep)) { const el = tkField(k); if (el) el.value = String(v); }
+      tkDirty();
+    } catch (e) {
+      showErr("tkErr", String(e?.message || e));
+      btn.disabled = false; btn.textContent = "Comment";
+    }
   }
 
   /* ---------- settings ---------- */
@@ -612,6 +783,31 @@
     e.preventDefault();
     openNewTicket();
   });
+  // A card or #number opens the ticket here. Cmd/Ctrl/Shift-click keeps the link's own
+  // behaviour, opening Azure DevOps; so does selecting text on a card.
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-ticket]");
+    if (!el || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    const a = e.target.closest("a");
+    if (a && a !== el && !a.dataset.ticket) return; // some other link inside a card
+    if (!a && String(getSelection()).trim()) return;
+    e.preventDefault();
+    openTicket(Number(el.dataset.ticket), { push: $("ticket").open });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.matches?.("article.card[data-ticket]")) { e.preventDefault(); openTicket(Number(e.target.dataset.ticket)); }
+  });
+  $("tk").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tk]"); if (!b) return;
+    const what = b.dataset.tk;
+    if (what === "close") $("ticket").close();
+    else if (what === "back" && tkBack.length) openTicket(tkBack.pop(), { push: false, keepBack: true });
+    else if (what === "save") tkSave();
+    else if (what === "discard") renderTicket(TK);
+    else if (what === "comment") tkComment();
+  });
+  $("tk").addEventListener("change", (e) => { if (e.target.matches("[data-f]")) tkDirty(); });
+  $("tk").addEventListener("keydown", (e) => { if (e.target.id === "tkComment" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkComment(); } });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
 
   /* ---------- Cmd/Ctrl + R: refresh from Azure DevOps instead of reloading the page ---------- */

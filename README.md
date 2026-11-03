@@ -17,6 +17,7 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 | **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, search, and hiding people you don't need to see. |
 | **Changes** | An Added tag for the last 24 hours, plus a Recent changes log kept on this computer. |
 | **Refresh** | Automatic every 10 minutes (configurable). Also when you return to the tab and the data is stale, and on demand with Refresh or Cmd/Ctrl+R. |
+| **Tickets** | Click a card or any `#number` to open the ticket on the board: description or repro steps, key fields, parent and children, discussion and recent history. Change its state, assignee or priority, or add a comment, without opening Azure DevOps. If someone else changed it since you opened it, your save is refused rather than overwriting theirs. Cmd/Ctrl-click opens it in Azure DevOps instead. |
 | **New tickets** | **+ New ticket** (or press **N**) creates a work item without opening Azure DevOps: any of the project's types, with title, description, priority, assignee and parent. It goes to the board's area path, and the board refreshes to show it (in the New lane, if that's on). |
 | **Sign-in** | **Sign in with Microsoft** (Entra ID, browser-based, with automatic token renewal), or a **Personal Access Token**. |
 | **Security** | Credentials live in the OS keychain. The local server only answers the tab it opened (see *Security*). |
@@ -68,7 +69,7 @@ Your filters and other view choices are remembered by the browser for that addre
 1. **Settings** opens on first run. Enter your organization, project and area path (for example `contoso`, `Fabrikam`, `Fabrikam\DevOps`) and save.
 2. **Sign in** with one of the two options:
    - **Sign in with Microsoft.** A new tab opens. Pick your work account, approve, and return to the board. The refresh token is saved in your keychain, so you stay signed in. This needs a one-time app registration (below).
-   - **Personal Access Token.** In Azure DevOps go to **User settings → Personal access tokens → New token**, give it the scope **Work Items → Read & write**, then paste it into the board. **Read** is enough if you only view the board; creating tickets needs write.
+   - **Personal Access Token.** In Azure DevOps go to **User settings → Personal access tokens → New token**, give it the scope **Work Items → Read & write**, then paste it into the board. **Read** is enough if you only view the board; creating tickets, editing them and commenting need write.
 3. Pick your name in **I am**; it's preselected from your sign-in. Your tickets then show as "You".
 
 On macOS, the first time the program reads a credential saved by an earlier version, the Keychain asks whether `azure-devops-board` may use it. Choose **Always Allow**.
@@ -159,9 +160,10 @@ ui/                board UI (HTML/CSS/JS), calls POST /api/<command> on the loca
 src/
   main.rs          the command: options, single instance, opening the browser
   server.rs        local web server: embedded UI, API routes, request checks
-  app.rs           the commands: settings, sign-in/out, load/refresh board, new tickets
+  app.rs           the commands: settings, sign-in/out, load/refresh board, new and open tickets
   auth.rs          PAT + Entra ID (PKCE, loopback redirect, token refresh)
   board.rs         WIQL + workitemsbatch queries, creating work items, snapshot, change log
   secrets.rs       OS keychain storage (chunked for Windows limits)
   settings.rs      settings model and defaults
+  ticket.rs        one ticket in full for the ticket panel; quick edits and comments
 ```
