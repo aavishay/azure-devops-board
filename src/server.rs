@@ -168,6 +168,11 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
         "sign_out" => to_json(app::sign_out(s).await),
         "load_board" => to_json(app::load_board(s).await),
         "refresh_board" => to_json(app::refresh_board(s, str_arg(&args, "reason")).await),
+        "ticket_types" => to_json(app::ticket_types(s).await),
+        "create_ticket" => match serde_json::from_value(args.get("ticket").cloned().unwrap_or(Value::Null)) {
+            Ok(ticket) => to_json(app::create_ticket(s, ticket).await),
+            Err(e) => Err(format!("Invalid ticket: {e}")),
+        },
         _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Unknown command: {cmd}") }))).into_response(),
     };
     match r {
@@ -286,6 +291,12 @@ mod tests {
         let bad = call("save_pat", json!({ "pat": "  " })).await.unwrap();
         assert_eq!(bad.status(), 400);
         assert!(bad.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("Personal Access Token"));
+        let untitled = call("create_ticket", json!({ "ticket": { "type": "Bug", "title": " " } })).await.unwrap();
+        assert_eq!(untitled.status(), 400);
+        assert!(untitled.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("title"));
+        let unset = call("ticket_types", json!({})).await.unwrap();
+        assert_eq!(unset.status(), 400);
+        assert!(unset.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("Settings"));
         assert_eq!(call("no_such_thing", json!({})).await.unwrap().status(), 404);
     }
 }

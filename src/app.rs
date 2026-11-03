@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::auth::{self, AccessToken, KEY_PAT, KEY_REFRESH};
-use crate::board::{Ado, Change, Snapshot, Store};
+use crate::board::{Ado, Change, Created, NewTicket, Snapshot, Store, TicketType};
 use crate::secrets::Secrets;
 use crate::settings::{AuthMode, Settings};
 
@@ -137,6 +137,16 @@ impl AppState {
 
     async fn set_error(&self, msg: &str) {
         *self.last_error.lock().await = Some(ErrorInfo { at: now_iso(), message: msg.to_string() });
+    }
+
+    /// The settings and an Authorization header, for a call made on the user's behalf.
+    async fn signed_in(&self) -> Result<(Settings, String), String> {
+        let s = self.settings.lock().await.clone();
+        if !s.is_configured() {
+            return Err("Set your Azure DevOps organization and project in Settings.".into());
+        }
+        let auth = self.auth_header().await?;
+        Ok((s, auth))
     }
 }
 
@@ -287,6 +297,29 @@ pub async fn refresh_board(state: &AppState, reason: Option<String>) -> Result<R
             Ok(RefreshResult { ok: false, skipped: false, changes: vec![], error: Some(e), message: None })
         }
     }
+}
+
+/// The work item types the "New ticket" form offers.
+pub async fn ticket_types(state: &AppState) -> Result<Vec<TicketType>, String> {
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.ticket_types().await
+}
+
+/// Creates a work item in the board's area path. The UI refreshes the board afterwards.
+pub async fn create_ticket(state: &AppState, ticket: NewTicket) -> Result<Created, String> {
+    let title = ticket.title.trim();
+    if title.is_empty() {
+        return Err("Give the ticket a title.".into());
+    }
+    if title.chars().count() > 255 {
+        return Err("The title can be at most 255 characters.".into());
+    }
+    let (s, auth) = state.signed_in().await?;
+    let ado = Ado { http: &state.http, settings: &s, auth };
+    // Looked up again rather than trusted from the form, so the fields match the type.
+    let types = ado.ticket_types().await?;
+    let ty = types.iter().find(|t| t.name == ticket.kind).ok_or_else(|| format!("You can't create a {} in {}.", ticket.kind, s.project))?;
+    ado.create(&ticket, ty).await
 }
 
 /* ---------------------------------------------------------------- state */
