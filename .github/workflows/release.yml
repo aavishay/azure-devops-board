@@ -245,6 +245,10 @@ jobs:
         if: env.TAP_KEY != ''
         run: |
           VER="${TAG#v}"
+          if [ ! -f tap/Formula/azure-devops-board.rb ]; then
+            echo "::warning::the tap has no Formula/azure-devops-board.rb yet, so the formula was not updated."
+            exit 0
+          fi
           scripts/update-formula.sh "$VER" \
             "dist/azure-devops-board-$VER-macos-universal.tar.gz" \
             "dist/azure-devops-board-$VER-linux-x86_64.tar.gz" \
