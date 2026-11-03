@@ -30,6 +30,9 @@ pub struct Item {
     pub title: String,
     pub owner: Option<String>,
     pub owner_full: Option<String>,
+    /// The owner's sign-in name, which assigns a new ticket to them unambiguously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_unique: Option<String>,
     #[serde(default)]
     pub creator: Option<String>,
     #[serde(default)]
@@ -52,6 +55,41 @@ pub struct Item {
 pub struct Parent {
     pub title: String,
     pub state: Option<String>,
+    pub url: String,
+}
+
+/// A work item type the board can create, and the fields its form fills.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketType {
+    pub name: String,
+    /// Bug-like types keep the description in Repro Steps; the rest in Description.
+    pub description_field: String,
+    pub has_priority: bool,
+}
+
+/// What the "New ticket" form sends.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTicket {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// A sign-in name or display name; blank leaves it unassigned.
+    #[serde(default)]
+    pub assigned_to: String,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub parent: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Created {
+    pub id: u64,
+    pub title: String,
     pub url: String,
 }
 
@@ -221,11 +259,15 @@ pub struct Ado<'a> {
 
 impl Ado<'_> {
     async fn call(&self, method: reqwest::Method, url: String, body: Option<Value>) -> Result<Value, String> {
-        let mut req = self.http.request(method, &url).header("Authorization", &self.auth).header("Accept", "application/json");
+        let mut req = self.http.request(method, &url);
         if let Some(b) = body {
             req = req.json(&b);
         }
-        let res = req.send().await.map_err(|e| {
+        self.send(req).await
+    }
+
+    async fn send(&self, req: reqwest::RequestBuilder) -> Result<Value, String> {
+        let res = req.header("Authorization", &self.auth).header("Accept", "application/json").send().await.map_err(|e| {
             if e.is_timeout() {
                 "Azure DevOps did not answer within 30 seconds.".to_string()
             } else {
@@ -299,6 +341,7 @@ impl Ado<'_> {
                 let raw_type = f["System.WorkItemType"].as_str().unwrap_or("Task");
                 let raw_state = f["System.State"].as_str().unwrap_or("").to_string();
                 let (owner, owner_full) = owner_of(&f["System.AssignedTo"]);
+                let owner_unique = f["System.AssignedTo"]["uniqueName"].as_str().filter(|u| !u.is_empty()).map(String::from);
                 let (creator, creator_full) = owner_of(&f["System.CreatedBy"]);
                 let kind = if raw_type == "Product Backlog Item" { "PBI".to_string() } else { raw_type.to_string() };
                 let parent = if kind == "Task" { f["System.Parent"].as_u64() } else { None };
@@ -317,6 +360,7 @@ impl Ado<'_> {
                     title: f["System.Title"].as_str().map(String::from).unwrap_or_else(|| format!("Work item {id}")),
                     owner,
                     owner_full,
+                    owner_unique,
                     creator,
                     creator_full,
                     url: s.edit_url(id),
@@ -377,6 +421,106 @@ impl Ado<'_> {
             .await?;
         Ok(duplicate_map(&r))
     }
+
+    /// The project's work item types that people create, without hidden and disabled ones.
+    pub async fn ticket_types(&self) -> Result<Vec<TicketType>, String> {
+        let api = self.settings.project_api();
+        let types = self.call(reqwest::Method::GET, format!("{api}/wit/workitemtypes?api-version=7.1"), None).await?;
+        let categories = self.call(reqwest::Method::GET, format!("{api}/wit/workitemtypecategories?api-version=7.1"), None).await?;
+        Ok(ticket_types(&types, &categories))
+    }
+
+    /// Creates a work item in the board's area path.
+    pub async fn create(&self, t: &NewTicket, ty: &TicketType) -> Result<Created, String> {
+        let s = self.settings;
+        let ops = create_ops(t, ty, &s.area_path, &s.org_url());
+        let req = self
+            .http
+            .post(format!("{}/wit/workitems/${}?api-version=7.1", s.project_api(), crate::settings::enc(&ty.name)))
+            .header("Content-Type", "application/json-patch+json")
+            .body(Value::Array(ops).to_string());
+        let w = self.send(req).await.map_err(|e| {
+            if e.starts_with("Unauthorized") {
+                "Azure DevOps didn't allow creating it. A Personal Access Token needs the Work Items (Read & write) scope; create a new one in Sign in.".to_string()
+            } else {
+                e
+            }
+        })?;
+        let id = w["id"].as_u64().ok_or("Azure DevOps didn't return the new ticket's number.")?;
+        Ok(Created { id, title: t.title.trim().to_string(), url: s.edit_url(id) })
+    }
+}
+
+fn ticket_types(types: &Value, categories: &Value) -> Vec<TicketType> {
+    let hidden: HashSet<&str> = categories["value"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["referenceName"].as_str() == Some("Microsoft.HiddenCategory"))
+        .flat_map(|c| c["workItemTypes"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str()))
+        .collect();
+    types["value"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| !t["isDisabled"].as_bool().unwrap_or(false))
+        .filter_map(|t| {
+            let name = t["name"].as_str()?;
+            if hidden.contains(name) {
+                return None;
+            }
+            let fields: HashSet<&str> = t["fields"].as_array().into_iter().flatten().filter_map(|f| f["referenceName"].as_str()).collect();
+            Some(TicketType {
+                name: name.to_string(),
+                description_field: if fields.contains("Microsoft.VSTS.TCM.ReproSteps") { "Microsoft.VSTS.TCM.ReproSteps" } else { "System.Description" }.into(),
+                // Without a field list, offer it; Azure DevOps names the field if it's wrong.
+                has_priority: fields.is_empty() || fields.contains("Microsoft.VSTS.Common.Priority"),
+            })
+        })
+        .collect()
+}
+
+/// The JSON Patch that creates `t`. Descriptions are HTML fields, so the text is escaped.
+fn create_ops(t: &NewTicket, ty: &TicketType, area_path: &str, org_url: &str) -> Vec<Value> {
+    let field = |name: &str, value: Value| serde_json::json!({ "op": "add", "path": format!("/fields/{name}"), "value": value });
+    let mut ops = vec![field("System.Title", t.title.trim().into()), field("System.AreaPath", area_path.into())];
+    let desc = t.description.trim();
+    if !desc.is_empty() {
+        ops.push(field(&ty.description_field, text_to_html(desc).into()));
+    }
+    if ty.has_priority {
+        if let Some(p) = t.priority {
+            ops.push(field("Microsoft.VSTS.Common.Priority", p.into()));
+        }
+    }
+    let who = t.assigned_to.trim();
+    if !who.is_empty() {
+        ops.push(field("System.AssignedTo", who.into()));
+    }
+    if let Some(p) = t.parent {
+        ops.push(serde_json::json!({
+            "op": "add",
+            "path": "/relations/-",
+            "value": { "rel": "System.LinkTypes.Hierarchy-Reverse", "url": format!("{org_url}/_apis/wit/workItems/{p}") },
+        }));
+    }
+    ops
+}
+
+fn text_to_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("<br>"),
+            '\r' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn duplicate_map(r: &Value) -> HashMap<u64, u64> {
@@ -437,6 +581,7 @@ mod tests {
             title: format!("t{id}"),
             owner: owner.map(String::from),
             owner_full: None,
+            owner_unique: None,
             creator: None,
             creator_full: None,
             url: String::new(),
@@ -458,6 +603,104 @@ mod tests {
         let m = duplicate_map(&r);
         assert_eq!(m.len(), 1);
         assert_eq!(m.get(&20), Some(&10));
+    }
+
+    #[test]
+    fn creatable_types() {
+        let types = serde_json::json!({ "value": [
+            { "name": "Bug", "fields": [{ "referenceName": "Microsoft.VSTS.TCM.ReproSteps" }, { "referenceName": "Microsoft.VSTS.Common.Priority" }] },
+            { "name": "Product Backlog Item", "fields": [{ "referenceName": "System.Description" }, { "referenceName": "Microsoft.VSTS.Common.Priority" }] },
+            { "name": "Impediment", "fields": [{ "referenceName": "System.Description" }] },
+            { "name": "Shared Steps", "fields": [] },
+            { "name": "Old Thing", "isDisabled": true },
+        ]});
+        let categories = serde_json::json!({ "value": [
+            { "referenceName": "Microsoft.HiddenCategory", "workItemTypes": [{ "name": "Shared Steps" }] },
+            { "referenceName": "Microsoft.BugCategory", "workItemTypes": [{ "name": "Bug" }] },
+        ]});
+        let t = ticket_types(&types, &categories);
+        assert_eq!(t.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Bug", "Product Backlog Item", "Impediment"]);
+        assert_eq!(t[0].description_field, "Microsoft.VSTS.TCM.ReproSteps");
+        assert_eq!(t[1].description_field, "System.Description");
+        assert!(t[1].has_priority && !t[2].has_priority);
+    }
+
+    #[test]
+    fn create_patch() {
+        let ty = TicketType { name: "Bug".into(), description_field: "Microsoft.VSTS.TCM.ReproSteps".into(), has_priority: true };
+        let t = NewTicket {
+            kind: "Bug".into(),
+            title: "  Login fails  ".into(),
+            description: "Steps:\n1. <open> & \"sign in\"".into(),
+            assigned_to: "sam.roe@example.com".into(),
+            priority: Some(1),
+            parent: Some(42),
+        };
+        let ops = create_ops(&t, &ty, "Fabrikam\\DevOps", "https://dev.azure.com/contoso");
+        let at = |path: &str| ops.iter().find(|o| o["path"] == path).map(|o| o["value"].clone());
+        assert_eq!(at("/fields/System.Title").unwrap(), "Login fails");
+        assert_eq!(at("/fields/System.AreaPath").unwrap(), "Fabrikam\\DevOps");
+        assert_eq!(at("/fields/Microsoft.VSTS.TCM.ReproSteps").unwrap(), "Steps:<br>1. &lt;open&gt; &amp; &quot;sign in&quot;");
+        assert_eq!(at("/fields/Microsoft.VSTS.Common.Priority").unwrap(), 1);
+        assert_eq!(at("/fields/System.AssignedTo").unwrap(), "sam.roe@example.com");
+        assert_eq!(at("/relations/-").unwrap()["url"], "https://dev.azure.com/contoso/_apis/wit/workItems/42");
+        assert!(at("/fields/System.Description").is_none());
+
+        // Only the title and area path when the rest is blank, and no priority on types without one.
+        let bare = NewTicket { description: " ".into(), assigned_to: String::new(), parent: None, ..t };
+        let ty = TicketType { has_priority: false, ..ty };
+        assert_eq!(create_ops(&bare, &ty, "A", "u").len(), 2);
+    }
+
+    /// Creates tickets against a fake Azure DevOps and checks what it was sent.
+    #[tokio::test]
+    async fn create_against_fake_server() {
+        use axum::{body::Bytes, http::{HeaderMap, Method, Uri}, response::IntoResponse};
+        use std::sync::{Arc, Mutex};
+        type Seen = Arc<Mutex<Vec<(String, String, String)>>>;
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let app = axum::Router::new().fallback(move |m: Method, u: Uri, h: HeaderMap, body: Bytes| {
+            let log = log.clone();
+            async move {
+                let ct = h.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                log.lock().unwrap().push((format!("{m} {u}"), ct, String::from_utf8_lossy(&body).into()));
+                if h.get("authorization").is_some_and(|a| a == "Basic read-only") {
+                    return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                }
+                let p = u.path();
+                let v = if p.ends_with("/wit/workitemtypes") {
+                    serde_json::json!({ "value": [{ "name": "Product Backlog Item", "fields": [{ "referenceName": "Microsoft.VSTS.Common.Priority" }] }] })
+                } else if p.ends_with("/wit/workitemtypecategories") {
+                    serde_json::json!({ "value": [] })
+                } else {
+                    serde_json::json!({ "id": 501 })
+                };
+                axum::Json(v).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let s = Settings { ado_url: format!("http://127.0.0.1:{port}"), org: "contoso".into(), project: "Fabrikam".into(), area_path: "Fabrikam\\DevOps".into(), ..Settings::default() }.normalized();
+        let http = reqwest::Client::new();
+        let ado = Ado { http: &http, settings: &s, auth: "Basic ok".into() };
+        let types = ado.ticket_types().await.unwrap();
+        assert_eq!(types[0].name, "Product Backlog Item");
+        let t = NewTicket { kind: types[0].name.clone(), title: "Rotate the keys".into(), description: String::new(), assigned_to: String::new(), priority: Some(2), parent: None };
+        let c = ado.create(&t, &types[0]).await.unwrap();
+        assert_eq!(c.id, 501);
+        assert_eq!(c.url, format!("http://127.0.0.1:{port}/contoso/Fabrikam/_workitems/edit/501"));
+
+        let (req, ct, body) = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(req, "POST /contoso/Fabrikam/_apis/wit/workitems/$Product%20Backlog%20Item?api-version=7.1");
+        assert_eq!(ct, "application/json-patch+json");
+        let ops: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(ops[0], serde_json::json!({ "op": "add", "path": "/fields/System.Title", "value": "Rotate the keys" }));
+
+        let read_only = Ado { http: &http, settings: &s, auth: "Basic read-only".into() };
+        assert!(read_only.create(&t, &types[0]).await.unwrap_err().contains("Read & write"));
     }
 
     #[test]

@@ -339,8 +339,9 @@
     $("lane-new").innerHTML = $("lane-doing").innerHTML = "";
   }
 
+  let refreshAgain = null; // a refresh asked for while one runs, that must not be dropped
   async function refresh(reason = "manual") {
-    if (refreshing) return;
+    if (refreshing) { if (reason === "created") refreshAgain = reason; return; }
     refreshing = true;
     const btn = $("refresh");
     btn.disabled = true; btn.classList.add("busy"); $("refreshLabel").textContent = "Refreshing…";
@@ -366,6 +367,7 @@
       btn.disabled = false; btn.classList.remove("busy"); $("refreshLabel").textContent = "Refresh";
       scheduleAuto();
       renderStatus();
+      if (refreshAgain) { const r = refreshAgain; refreshAgain = null; refresh(r); }
     }
   }
 
@@ -439,6 +441,90 @@
     notice("ok", "Signed out. Your saved token or Microsoft sign-in was removed from this computer.");
   }
 
+  /* ---------- new ticket ---------- */
+  let TYPES = null; // the project's creatable work item types, loaded on first use
+  const DEFAULT_TYPES = ["Product Backlog Item", "User Story", "Requirement", "Issue"];
+  const REPRO = "Microsoft.VSTS.TCM.ReproSteps";
+  // "Alex Doe (Contractor)" and "Alex Doe <alex@…>" are both Alex Doe, as the server cleans owners.
+  const plainName = (n) => String(n || "").replace(/[(<][^)>]*[)>]/g, "").replace(/\s+/g, " ").trim();
+
+  function fillTypes() {
+    const sel = $("newForm").elements.namedItem("type");
+    const want = [store.get("newType", ""), ...DEFAULT_TYPES].find((n) => TYPES.some((t) => t.name === n)) || TYPES[0]?.name;
+    sel.innerHTML = TYPES.map((t) => `<option${t.name === want ? " selected" : ""}>${esc(t.name)}</option>`).join("");
+    sel.disabled = false;
+    typeChanged();
+  }
+
+  function typeChanged() {
+    const form = $("newForm");
+    const ty = TYPES?.find((t) => t.name === form.elements.namedItem("type").value);
+    $("descLabel").textContent = ty?.descriptionField === REPRO ? "Repro steps" : "Description";
+    form.elements.namedItem("priority").disabled = ty ? !ty.hasPriority : false;
+  }
+
+  async function openNewTicket() {
+    if (!BOARD?.configured) return openSettings();
+    if (!AUTH?.signedIn) return openSignIn();
+    const form = $("newForm");
+    showErr("newErr", "");
+    $("newWhere").textContent = `It goes to ${BOARD.subtitle.replace(/ · Azure Boards$/, "")}, so it shows on this board.`;
+
+    // People on the board, by the sign-in name that assigns to them unambiguously.
+    const people = new Map();
+    for (const t of ALL) if (t.ownerFull) people.set(t.ownerFull, t.ownerUnique || t.ownerFull);
+    const mine = plainName(BOARD.user);
+    const meValue = people.get(mine) || BOARD.user || "";
+    people.delete(mine);
+    const opts = [["", "Unassigned"], ...(meValue ? [[meValue, `Me (${mine})`]] : []),
+      ...[...people].sort(([a], [b]) => a.localeCompare(b)).map(([n, v]) => [v, n])];
+    const who = form.elements.namedItem("assignedTo");
+    who.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+    const lastWho = store.get("newAssignee", "");
+    who.value = opts.some(([v]) => v === lastWho) ? lastWho : "";
+
+    $("parentList").innerHTML = ALL.filter((t) => t.type !== "Task").sort((a, b) => b.id - a.id)
+      .map((t) => `<option value="${esc(t.id)}">${esc(t.type)} · ${esc(t.title)}</option>`).join("");
+
+    if (TYPES) fillTypes();
+    else {
+      const sel = form.elements.namedItem("type");
+      sel.innerHTML = "<option>Loading…</option>"; sel.disabled = true;
+    }
+    if (!$("newTicket").open) $("newTicket").showModal();
+    form.elements.namedItem("title").focus();
+    if (!TYPES) {
+      try { TYPES = await invoke("ticket_types"); fillTypes(); }
+      catch (e) { showErr("newErr", `Could not load the work item types. ${e?.message || e}`); }
+    }
+  }
+
+  async function createTicket(ev) {
+    ev.preventDefault();
+    const form = $("newForm");
+    const v = (k) => form.elements.namedItem(k).value;
+    const parent = v("parent").trim();
+    if (parent && !/^\d+$/.test(parent)) return showErr("newErr", "Parent takes a ticket number, like 1234.");
+    if (!TYPES?.length) return showErr("newErr", "The work item types haven't loaded. Close this and try again.");
+    const ty = TYPES.find((t) => t.name === v("type"));
+    const ticket = {
+      type: v("type"), title: v("title"), description: v("description"), assignedTo: v("assignedTo"),
+      priority: ty?.hasPriority ? parseInt(v("priority"), 10) : null, parent: parent ? Number(parent) : null,
+    };
+    const btn = $("newSave"); btn.disabled = true; btn.textContent = "Creating…";
+    showErr("newErr", "");
+    try {
+      const c = await invoke("create_ticket", { ticket });
+      store.set("newType", ticket.type); store.set("newAssignee", ticket.assignedTo);
+      $("newTicket").close();
+      form.reset();
+      notice("ok", `<b>Created <a href="${esc(c.url)}" target="_blank" rel="noopener">#${esc(c.id)}</a></b> ${esc(c.title)}`);
+      refresh("created");
+    } catch (e) {
+      showErr("newErr", String(e?.message || e));
+    } finally { btn.disabled = false; btn.textContent = "Create"; }
+  }
+
   /* ---------- settings ---------- */
   async function openSettings() {
     const s = await invoke("get_settings");
@@ -467,6 +553,7 @@
     if (next.timeZone) { try { new Intl.DateTimeFormat("en-GB", { timeZone: next.timeZone }); } catch { return showErr("settingsErr", `“${next.timeZone}” is not a time zone name. Try Europe/London or leave it blank.`); } }
     try {
       await invoke("save_settings", { settings: next });
+      TYPES = null; // the project may have changed
       $("settings").close();
       await refreshAuth();
       await load();
@@ -514,6 +601,17 @@
   $("pat").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); savePat(); } });
   $("signOutBtn").addEventListener("click", signOut);
   $("settingsForm").addEventListener("submit", (e) => { if (e.submitter?.value === "save") saveSettings(e); });
+  $("newBtn").addEventListener("click", openNewTicket);
+  $("newCancel").addEventListener("click", () => $("newTicket").close()); // keeps what was typed for next time
+  $("newForm").elements.namedItem("type").addEventListener("change", typeChanged);
+  $("newForm").addEventListener("submit", createTicket);
+  // N opens "New ticket", unless typing somewhere or a dialog is open.
+  document.addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() !== "n" || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+    if (e.target.closest?.("input,textarea,select,[contenteditable]") || document.querySelector("dialog[open]")) return;
+    e.preventDefault();
+    openNewTicket();
+  });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
 
   /* ---------- Cmd/Ctrl + R: refresh from Azure DevOps instead of reloading the page ---------- */
