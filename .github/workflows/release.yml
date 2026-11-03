@@ -1,10 +1,11 @@
-# Release workflow. Push a tag like v1.0.1 (`git tag v1.0.1 && git push --tags`) and it will
-#   1. build and test on macOS, create the release and attach the universal .dmg and .app.zip,
-#   2. build the Linux AppImage and Windows installer (the same workflows PRs run) and attach them,
-#   3. update Casks/azure-devops-board.rb in aavishay/homebrew-azure-devops-board with the new version and sha256.
+# Release workflow. Push a tag matching the version in Cargo.toml, like v2.0.1
+# (`git tag v2.0.1 && git push --tags`), and it will
+#   1. test on macOS, build a universal binary, create the release and attach it,
+#   2. build the Linux and Windows programs (the same workflows PRs run) and attach them,
+#   3. update Formula/azure-devops-board.rb in aavishay/homebrew-azure-devops-board with the new version and checksums.
 # Also runnable by hand from the Actions tab to re-cut an existing tag.
 # Step 3 needs the repo secret TAP_DEPLOY_KEY: the private half of a write-enabled deploy key on the tap.
-# Without it the cask is skipped.
+# Without it the formula is skipped.
 name: release
 
 on:
@@ -32,45 +33,54 @@ jobs:
         with:
           ref: ${{ env.TAG }}
 
-      # Without the x86_64 slice the app would refuse to launch on Intel Macs.
+      # Without the x86_64 slice the program would refuse to run on Intel Macs.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
 
-      - name: Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
+      - name: Check the tag matches Cargo.toml
+        run: |
+          VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          [ "${TAG#v}" = "$VER" ] || { echo "::error::tag $TAG does not match the version in Cargo.toml ($VER)"; exit 1; }
 
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked
 
-      - name: Build universal .app and .dmg
-        working-directory: src-tauri
-        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg --config "{\"version\":\"${TAG#v}\"}"
-
-      - name: Collect assets and checksums
+      - name: Build a universal binary
         run: |
           set -euo pipefail
-          VER="${TAG#v}"
-          B=src-tauri/target/universal-apple-darwin/release/bundle
-          mkdir -p dist
-          cp "$B"/dmg/*.dmg "dist/azure-devops-board-$VER-macos-universal.dmg"
-          # A zipped .app as well, for anyone who'd rather not mount a disk image.
-          ditto -c -k --keepParent "$B/macos/Azure DevOps Board.app" "dist/azure-devops-board-$VER-macos-universal.app.zip"
-          cd dist
-          shasum -a 256 -- * | tee SHA256SUMS.txt
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$t"
+          done
+          mkdir -p universal
+          lipo -create -output universal/azure-devops-board \
+            target/aarch64-apple-darwin/release/azure-devops-board \
+            target/x86_64-apple-darwin/release/azure-devops-board
+          # Ad-hoc signed, as each slice was: Apple Silicon refuses to run unsigned code.
+          codesign --force --sign - universal/azure-devops-board
 
       - name: Verify the binary really is universal
         run: |
           set -euo pipefail
-          ARCHS=$(lipo -archs "src-tauri/target/universal-apple-darwin/release/bundle/macos/Azure DevOps Board.app/Contents/MacOS/devops-board")
+          ARCHS=$(lipo -archs universal/azure-devops-board)
           echo "architectures: $ARCHS"
           for want in arm64 x86_64; do
             case "$ARCHS" in *"$want"*) ;; *) echo "::error::missing $want slice"; exit 1 ;; esac
           done
+          codesign --verify --verbose universal/azure-devops-board
+
+      - name: Start it and check it serves the board
+        run: scripts/smoke-test.sh universal/azure-devops-board
+
+      - name: Package and checksum it
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/azure-devops-board-${TAG#v}-macos-universal.tar.gz" -C universal azure-devops-board
+          cd dist
+          shasum -a 256 -- * | tee SHA256SUMS.txt
 
       # Retried: the action uploads the files concurrently, and GitHub sometimes
       # answers one of them with a 500. Re-attaching a file that already landed is
@@ -108,7 +118,7 @@ jobs:
           NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           echo "$NAMES"
           MISSING=0
-          for want in "azure-devops-board-$VER-macos-universal.dmg" "azure-devops-board-$VER-macos-universal.app.zip" "SHA256SUMS.txt"; do
+          for want in "azure-devops-board-$VER-macos-universal.tar.gz" "SHA256SUMS.txt"; do
             printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
           done
           [ "$MISSING" -eq 0 ]
@@ -116,12 +126,12 @@ jobs:
   # Built by the same workflows pull requests run. They hold no write access and
   # produce only an artifact; the publish jobs below attach it.
   linux:
-    uses: ./.github/workflows/linux-appimage.yml
+    uses: ./.github/workflows/linux.yml
     with:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
 
   windows:
-    uses: ./.github/workflows/windows-nsis.yml
+    uses: ./.github/workflows/windows.yml
     with:
       tag: ${{ github.event.inputs.tag || github.ref_name }}
 
@@ -131,7 +141,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: linux-appimage
+          name: linux
           path: dist
 
       # No body or release notes: the macOS job owns those.
@@ -159,7 +169,7 @@ jobs:
           NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           echo "$NAMES"
           MISSING=0
-          for want in "azure-devops-board-$VER-linux-x86_64.AppImage" "SHA256SUMS-linux.txt"; do
+          for want in "azure-devops-board-$VER-linux-x86_64.tar.gz" "SHA256SUMS-linux.txt"; do
             printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
           done
           [ "$MISSING" -eq 0 ]
@@ -170,7 +180,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: windows-nsis
+          name: windows
           path: dist
 
       - uses: softprops/action-gh-release@v3
@@ -197,15 +207,15 @@ jobs:
           NAMES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           echo "$NAMES"
           MISSING=0
-          for want in "azure-devops-board-$VER-windows-x64-setup.exe" "SHA256SUMS-windows.txt"; do
+          for want in "azure-devops-board-$VER-windows-x64.zip" "SHA256SUMS-windows.txt"; do
             printf '%s\n' "$NAMES" | grep -Fxq -- "$want" || { echo "::error::the release is missing $want"; MISSING=1; }
           done
           [ "$MISSING" -eq 0 ]
 
-  # Takes the .dmg from the published release, so the cask's sha256 is of the
-  # exact file users download.
-  cask:
-    needs: macos
+  # Takes the archives from the published release, so the formula's checksums are of
+  # the exact files users download.
+  formula:
+    needs: [macos, linux-publish]
     runs-on: ubuntu-latest
     env:
       TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
@@ -213,14 +223,16 @@ jobs:
     steps:
       - name: Check for the tap deploy key
         if: env.TAP_KEY == ''
-        run: echo "::warning::TAP_DEPLOY_KEY is not set, so the Homebrew cask was not updated."
+        run: echo "::warning::TAP_DEPLOY_KEY is not set, so the Homebrew formula was not updated."
 
       - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
 
-      - name: Download the .dmg from the release
+      - name: Download the macOS and Linux archives from the release
         if: env.TAP_KEY != ''
-        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*-macos-universal.dmg' --dir dist
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist \
+            --pattern '*-macos-universal.tar.gz' --pattern '*-linux-x86_64.tar.gz'
 
       - uses: actions/checkout@v7
         if: env.TAP_KEY != ''
@@ -229,13 +241,20 @@ jobs:
           ssh-key: ${{ env.TAP_KEY }}
           path: tap
 
-      - name: Update the cask
+      - name: Update the formula
         if: env.TAP_KEY != ''
         run: |
           VER="${TAG#v}"
-          scripts/update-cask.sh "$VER" "dist/azure-devops-board-$VER-macos-universal.dmg" tap/Casks/azure-devops-board.rb
+          if [ ! -f tap/Formula/azure-devops-board.rb ]; then
+            echo "::warning::the tap has no Formula/azure-devops-board.rb yet, so the formula was not updated."
+            exit 0
+          fi
+          scripts/update-formula.sh "$VER" \
+            "dist/azure-devops-board-$VER-macos-universal.tar.gz" \
+            "dist/azure-devops-board-$VER-linux-x86_64.tar.gz" \
+            tap/Formula/azure-devops-board.rb
           cd tap
-          if git diff --quiet; then echo "Cask already at $VER."; exit 0; fi
+          if git diff --quiet; then echo "Formula already at $VER."; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "azure-devops-board $VER"
