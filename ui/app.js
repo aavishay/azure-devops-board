@@ -270,10 +270,23 @@
     return `<ul>${changes.slice(0, 12).map((c) => `<li>${t(c)}</li>`).join("")}</ul>${changes.length > 12 ? `…and ${changes.length - 12} more` : ""}`;
   }
 
-  /* ---------- Tauri bridge ---------- */
-  const TAURI = window.__TAURI__;
-  const invoke = (cmd, args) => TAURI ? TAURI.core.invoke(cmd, args) : Promise.reject(new Error("Run this inside the Azure DevOps Board app."));
-  const openExternal = (url) => { if (TAURI?.opener) TAURI.opener.openUrl(url).catch(() => {}); else window.open(url, "_blank", "noopener"); };
+  /* ---------- server bridge: POST /api/<command> to the local azure-devops-board server ---------- */
+  // Failures reject with the server's message string, which the callers show as is.
+  async function invoke(cmd, args) {
+    let res;
+    try {
+      res = await fetch(`/api/${cmd}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Board": "1" },
+        body: JSON.stringify(args || {}),
+      });
+    } catch {
+      throw "The board isn't running. Start it again by running azure-devops-board in a terminal.";
+    }
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw j.error || `Request failed (HTTP ${res.status}).`;
+    return j;
+  }
 
   /* ---------- data loading ---------- */
   let AUTH = null;
@@ -473,12 +486,10 @@
   $("me").addEventListener("change", (e) => { me = e.target.value; store.set("me", me); if (!me && f.preset === "mine") f.preset = null; render(); });
   setInterval(renderStatus, 60e3); // keep "stale" indicator honest
 
-  /* ---------- desktop wiring ---------- */
+  /* ---------- dialogs and account ---------- */
   document.addEventListener("click", (e) => {
     const op = e.target.closest("[data-open]");
-    if (op) { e.preventDefault(); op.dataset.open === "settings" ? openSettings() : openSignIn(); return; }
-    const a = e.target.closest("a[href]");
-    if (a && /^https?:/i.test(a.getAttribute("href"))) { e.preventDefault(); openExternal(a.href); }
+    if (op) { e.preventDefault(); op.dataset.open === "settings" ? openSettings() : openSignIn(); }
   }, true);
   $("accountBtn").addEventListener("click", openSignIn);
   $("settingsBtn").addEventListener("click", openSettings);
@@ -490,28 +501,6 @@
   $("signOutBtn").addEventListener("click", signOut);
   $("settingsForm").addEventListener("submit", (e) => { if (e.submitter?.value === "save") saveSettings(e); });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
-
-  /* ---------- zoom: Cmd/Ctrl + "+" / "-" / "0", remembered across restarts ---------- */
-  const ZOOMS = [0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
-  let zoom = ZOOMS.includes(+store.get("zoom", 1)) ? +store.get("zoom", 1) : 1;
-  function applyZoom() {
-    const wv = TAURI?.webview?.getCurrentWebview?.();
-    const css = () => { document.documentElement.style.zoom = zoom; };
-    if (wv) wv.setZoom(zoom).catch(css); else css();
-    store.set("zoom", zoom);
-  }
-  document.addEventListener("keydown", (e) => {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-    const i = ZOOMS.indexOf(zoom);
-    let next;
-    if (e.key === "=" || e.key === "+" || e.code === "NumpadAdd") next = ZOOMS[Math.min(i + 1, ZOOMS.length - 1)];
-    else if (e.key === "-" || e.key === "_" || e.code === "NumpadSubtract") next = ZOOMS[Math.max(i - 1, 0)];
-    else if (e.key === "0" || e.code === "Numpad0") next = 1;
-    else return;
-    e.preventDefault();
-    if (next !== zoom) { zoom = next; applyZoom(); }
-  });
-  if (zoom !== 1) applyZoom();
 
   /* ---------- Cmd/Ctrl + R: refresh from Azure DevOps instead of reloading the page ---------- */
   document.addEventListener("keydown", (e) => {

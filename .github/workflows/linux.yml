@@ -1,0 +1,99 @@
+# Linux x86-64 build. Pull requests run it as a build check, and release.yml calls it
+# with a tag to produce the release asset, so a release builds exactly what PRs test.
+name: Linux
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, checked against Cargo.toml and used to name the asset. Empty for a build-only check."
+        required: false
+        type: string
+        default: ""
+
+# Read-only: this only produces an artifact. Attaching it to a release is
+# release.yml's job, so a PR run cannot write to the repository.
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04 # oldest available glibc, so the program runs on more distros
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The keyring talks to the Secret Service over D-Bus.
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libdbus-1-dev pkg-config
+
+      - name: Version
+        id: ver
+        run: |
+          set -euo pipefail
+          VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          TAG="${{ inputs.tag }}"
+          if [ -n "$TAG" ] && [ "${TAG#v}" != "$VER" ]; then
+            echo "::error::tag $TAG does not match the version in Cargo.toml ($VER)"
+            exit 1
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Start it and check it serves the board
+        run: scripts/smoke-test.sh target/release/azure-devops-board
+
+      - name: Verify it is an x86-64 executable
+        run: |
+          DESC=$(file -b target/release/azure-devops-board)
+          echo "file: $DESC"
+          case "$DESC" in
+            *ELF*64-bit*x86-64*) ;;
+            *) echo "::error::not an x86-64 ELF: $DESC"; exit 1 ;;
+          esac
+
+      - name: Package and checksum it
+        run: |
+          set -euo pipefail
+          ASSET="azure-devops-board-${{ steps.ver.outputs.ver }}-linux-x86_64.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/$ASSET" -C target/release azure-devops-board
+          cd dist
+          # Its own file: each platform's job uploads one, and the same name would overwrite.
+          sha256sum "$ASSET" | tee SHA256SUMS-linux.txt
+
+      # Two attempts: a failed artifact upload leaves the release without this platform.
+      - uses: actions/upload-artifact@v7
+        id: upload
+        continue-on-error: true
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Retry the upload
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Say so if the upload needed a retry
+        if: steps.upload.outcome == 'failure'
+        run: echo "::warning::the artifact upload failed once and succeeded on retry"

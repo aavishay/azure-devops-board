@@ -1,21 +1,17 @@
 ## Install
 
-**macOS** (universal: Apple Silicon and Intel)
+**Homebrew** (macOS and Linux)
 
 ```bash
 brew tap aavishay/azure-devops-board
 brew trust aavishay/azure-devops-board
-brew install --cask azure-devops-board
+brew install azure-devops-board
 ```
 
-The build is not notarized. The cask clears the quarantine flag, but if you
-install the `.dmg` or `.app.zip` directly, clear it once yourself:
+Then run `azure-devops-board`. It opens the board in your default browser; press Ctrl+C in the terminal to stop it.
 
-```bash
-xattr -dr com.apple.quarantine "/Applications/Azure DevOps Board.app"
-```
+Coming from the desktop app? Remove it first with `brew uninstall --cask azure-devops-board`. Your settings and sign-in carry over.
 
-**Windows:** run the `windows-x64-setup.exe`. It is not code-signed, so
-SmartScreen may say "Windows protected your PC": choose **More info → Run anyway**.
-
-**Linux:** download the `.AppImage`, `chmod +x` it and run it. Needs WebKitGTK 4.1.
+**Without Homebrew:** download the archive for your system, put `azure-devops-board` on your `PATH`, and run it.
+The builds are not signed. On macOS, clear the quarantine flag once: `xattr -d com.apple.quarantine azure-devops-board`.
+On Windows, SmartScreen may warn the first time: choose **More info → Run anyway**.

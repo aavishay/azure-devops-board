@@ -1,0 +1,100 @@
+# Windows x64 build. Pull requests run it as a build check, and release.yml calls it
+# with a tag to produce the release asset, so a release builds exactly what PRs test.
+name: Windows
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag, checked against Cargo.toml and used to name the asset. Empty for a build-only check."
+        required: false
+        type: string
+        default: ""
+
+# Read-only: this only produces an artifact. Attaching it to a release is release.yml's job.
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        # Git Bash, so the steps read like the Linux ones. PowerShell only where
+        # Windows itself is the subject.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version
+        id: ver
+        run: |
+          set -euo pipefail
+          VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          TAG="${{ inputs.tag }}"
+          if [ -n "$TAG" ] && [ "${TAG#v}" != "$VER" ]; then
+            echo "::error::tag $TAG does not match the version in Cargo.toml ($VER)"
+            exit 1
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      # The only place the Windows keychain backend and the cfg(unix)-free code get compiled and tested.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Start it and check it serves the board
+        run: scripts/smoke-test.sh target/release/azure-devops-board.exe
+
+      - name: Verify it is an x64 Windows executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bytes = [System.IO.File]::ReadAllBytes("target\release\azure-devops-board.exe")
+          # e_lfanew at 0x3C points at the PE signature; the machine field follows it. 0x8664 is x86-64.
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $sig = [System.Text.Encoding]::ASCII.GetString($bytes, $pe, 4)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          "signature=$($sig.Trim([char]0)) machine=0x{0:X4}" -f $machine
+          if ($sig -ne "PE`0`0" -or $machine -ne 0x8664) { throw "not an x64 PE executable" }
+
+      - name: Package and checksum it
+        run: |
+          set -euo pipefail
+          ASSET="azure-devops-board-${{ steps.ver.outputs.ver }}-windows-x64.zip"
+          mkdir -p dist
+          (cd target/release && 7z a -tzip "../../dist/$ASSET" azure-devops-board.exe > /dev/null)
+          cd dist
+          sha256sum "$ASSET" | tee SHA256SUMS-windows.txt
+
+      # Two attempts: a failed artifact upload leaves the release without this platform.
+      - uses: actions/upload-artifact@v7
+        id: upload
+        continue-on-error: true
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Retry the upload
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Say so if the upload needed a retry
+        if: steps.upload.outcome == 'failure'
+        run: echo "::warning::the artifact upload failed once and succeeded on retry"

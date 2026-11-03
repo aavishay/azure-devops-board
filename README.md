@@ -1,53 +1,76 @@
-# Azure DevOps Board (desktop)
+# Azure DevOps Board
 
-A native desktop app for **Windows, macOS and Linux** that shows the Azure DevOps team's **New**, **To Do · Committed** and **In Progress** work as a kanban board. It's built with **Rust + Tauri 2**:
+A team board for **Azure DevOps** that runs in your browser. It shows the team's **New**, **To Do · Committed** and **In Progress** work as a kanban board.
 
-- The Rust backend handles sign-in, Azure DevOps API calls, credential storage and change tracking.
-- The board UI runs in the system webview: WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux.
+Run `azure-devops-board` and it opens the board in your default browser. A small Rust program runs on your computer while you use it:
 
-Each person runs it on their own machine and signs in with **their own Azure DevOps access**. No server is needed, and there is no shared token to manage.
+- It serves the board UI at `http://127.0.0.1` (this computer only).
+- It handles sign-in, Azure DevOps API calls, credential storage and change tracking, so your credentials never reach the browser.
+
+Each person runs it on their own machine and signs in with **their own Azure DevOps access**. No shared server is needed, and there is no shared token to manage. It works on **macOS, Linux and Windows**.
 
 ## What you get
 
 | Area | Features |
 |---|---|
-| **Board** | Two lanes, grouped by workstream or by person. Incidents and P1 items are highlighted, and tasks link to their parent PBI. |
-| **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, and search. |
-| **Changes** | New and Reassigned tags for the last 24 hours, plus a Recent changes log kept on this computer. |
-| **Refresh** | Automatic every 10 minutes (configurable). Also on window focus when the data is stale, and on demand with Refresh. |
+| **Board** | Lanes for New, To Do and In Progress, grouped by workstream or by person. Incidents and P1 items are highlighted, tasks link to their parent PBI, and duplicates are merged into one card. |
+| **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, search, and hiding people you don't need to see. |
+| **Changes** | An Added tag for the last 24 hours, plus a Recent changes log kept on this computer. |
+| **Refresh** | Automatic every 10 minutes (configurable). Also when you return to the tab and the data is stale, and on demand with Refresh or Cmd/Ctrl+R. |
 | **Sign-in** | **Sign in with Microsoft** (Entra ID, browser-based, with automatic token renewal), or a **Personal Access Token**. |
-| **Security** | Credentials live in the OS keychain. Links open in your normal browser. |
+| **Security** | Credentials live in the OS keychain. The local server only accepts requests from the tab it opened (see *Security*). |
 
 ## Install
 
-### macOS (Homebrew)
+### Homebrew (macOS and Linux)
 
 ```sh
 brew tap aavishay/azure-devops-board
 brew trust aavishay/azure-devops-board   # Homebrew 7+ asks you to trust third-party taps
-brew install --cask azure-devops-board
+brew install azure-devops-board
 ```
 
-Upgrade with `brew upgrade --cask azure-devops-board`. `brew uninstall --zap --cask azure-devops-board` also removes settings and the board cache.
+Upgrade with `brew upgrade azure-devops-board`.
 
-Before the first GitHub release exists, build and install it on your Mac in one step: `scripts/install-mac.sh` (installs Rust through Homebrew if it's missing).
+If you used the old desktop app, remove it first with `brew uninstall --cask azure-devops-board`. Your settings, saved sign-in and board history carry over.
 
-### Windows and Linux
+### Windows, or without Homebrew
 
-Homebrew casks are macOS-only. Download the installer from the [GitHub releases](https://github.com/aavishay/azure-devops-board/releases):
+Download the archive for your system from the [GitHub releases](https://github.com/aavishay/azure-devops-board/releases) and put the `azure-devops-board` program somewhere on your `PATH`:
 
-| OS | File | Note |
-|---|---|---|
-| Windows | `azure-devops-board-<ver>-windows-x64-setup.exe` | Per-user install, no admin rights. WebView2 ships with Windows 10/11. |
-| Linux | `azure-devops-board-<ver>-linux-x86_64.AppImage` (any distro; `chmod +x` and run) | Needs WebKitGTK 4.1 (preinstalled on current GNOME/KDE desktops). |
+| OS | File |
+|---|---|
+| macOS (Apple Silicon and Intel) | `azure-devops-board-<ver>-macos-universal.tar.gz` |
+| Linux (x86-64) | `azure-devops-board-<ver>-linux-x86_64.tar.gz` |
+| Windows (x64) | `azure-devops-board-<ver>-windows-x64.zip` |
+
+With Rust installed, `cargo install --git https://github.com/aavishay/azure-devops-board` also works.
+
+## Running it
+
+```sh
+azure-devops-board
+```
+
+The board opens in your default browser. Leave the terminal open while you use it, and press **Ctrl+C** to stop. Running the command again while the board is already running just reopens it in the browser.
+
+| Option | |
+|---|---|
+| `-p`, `--port <port>` | Listen on this port. The default is `47180`, or any free port if that one is taken. |
+| `--no-open` | Don't open the browser; just print the address. |
+| `-h`, `--help` / `-V`, `--version` | Show help or the version. |
+
+Your filters and other view choices are remembered by the browser for that address, so keeping the default port keeps them.
 
 ## First run
 
 1. **Settings** opens on first run. Enter your organization, project and area path (for example `contoso`, `Fabrikam`, `Fabrikam\DevOps`) and save.
 2. **Sign in** with one of the two options:
-   - **Sign in with Microsoft.** Your browser opens. Pick your work account, approve, and return to the app. The refresh token is saved in your keychain, so you stay signed in. This needs a one-time app registration (below).
-   - **Personal Access Token.** In Azure DevOps go to **User settings → Personal access tokens → New token**, give it the scope **Work Items → Read**, then paste it into the app.
+   - **Sign in with Microsoft.** A new tab opens. Pick your work account, approve, and return to the board. The refresh token is saved in your keychain, so you stay signed in. This needs a one-time app registration (below).
+   - **Personal Access Token.** In Azure DevOps go to **User settings → Personal access tokens → New token**, give it the scope **Work Items → Read**, then paste it into the board.
 3. Pick your name in **I am**; it's preselected from your sign-in. Your tickets then show as "You".
+
+On macOS, the first time the program reads a credential saved by an earlier version, the Keychain asks whether `azure-devops-board` may use it. Choose **Always Allow**.
 
 ## One-time setup for "Sign in with Microsoft" (Entra admin, ~3 minutes)
 
@@ -63,73 +86,78 @@ An Azure admin creates one app registration for the whole team:
 
 Each user pastes these into **Settings → Microsoft sign-in**, or you ship them pre-filled (see *Pre-filling settings*).
 
-The sign-in uses the OAuth 2.0 authorization-code flow with PKCE and a loopback redirect, which is Microsoft's recommended flow for desktop apps.
+The sign-in uses the OAuth 2.0 authorization-code flow with PKCE and a loopback redirect, which is Microsoft's recommended flow for native apps.
 - **Requested scope:** Azure DevOps (`499b84ac-1321-427f-aa17-267ca6975798/.default`) plus `offline_access`.
 - **No client secret.** None is stored or needed.
 - **Conditional Access** (MFA, compliant device) applies as it does for any Microsoft sign-in.
+
+## Security
+
+The server listens on `127.0.0.1` only, so nothing else on the network can reach it. Web pages open in your browser can still send requests to localhost, so every request must also prove it comes from the board's own tab:
+
+- The command opens a one-time address that sets a secret token as an `HttpOnly`, `SameSite=Strict` cookie, then removes the token from the address bar. Other sites' pages never send that cookie.
+- API calls must also carry a custom header, which another site can only add with permission this server never gives.
+- The `Host` header must be the server's own address, which blocks DNS-rebinding attacks.
+
+The token is kept in `server.json` (readable only by you), so an open tab keeps working after you restart the command.
 
 ## Where things are stored
 
 | What | Where |
 |---|---|
-| Settings | `settings.json` in the app config folder: `%APPDATA%\com.au10tix.devopsboard` (Windows), `~/Library/Application Support/com.au10tix.devopsboard` (macOS), `~/.config/com.au10tix.devopsboard` (Linux) |
-| PAT / refresh token | OS credential store: Windows Credential Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring / KWallet). If no keyring is running on Linux, the app falls back to `credentials.fallback.json` with `0600` permissions. |
-| Board snapshot + change log | `board/` in the app data folder |
+| Settings | `settings.json` in the config folder: `%APPDATA%\com.au10tix.devopsboard` (Windows), `~/Library/Application Support/com.au10tix.devopsboard` (macOS), `~/.config/com.au10tix.devopsboard` (Linux) |
+| PAT / refresh token | OS credential store: Windows Credential Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring / KWallet). If no keyring is running on Linux, it falls back to `credentials.fallback.json` with `0600` permissions. |
+| Board snapshot + change log | `board/` in the data folder (the same as the config folder on Windows and macOS, `~/.local/share/com.au10tix.devopsboard` on Linux) |
+| Server port and browser token | `server.json` in the data folder |
 
 **Sign out** removes the saved credentials from this computer.
 
 ## Pre-filling settings
 
-To give the team a ready-to-go install, edit the defaults in `src-tauri/src/settings.rs` (`impl Default for Settings`) before building. Set `tenant_id` and `client_id` there and nobody has to type them.
+To give the team a ready-to-go build, edit the defaults in `src/settings.rs` (`impl Default for Settings`) before building. Set `tenant_id` and `client_id` there and nobody has to type them.
 
 Workstream grouping rules are in `ui/workstreams.js`.
 
 ## Building
 
-You need:
-- [Rust](https://rustup.rs) (stable)
-- The Tauri CLI: `cargo install tauri-cli --version "^2" --locked`
-- On Linux only: `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev libssl-dev patchelf`
+You need [Rust](https://rustup.rs) (stable). On Linux, also `sudo apt install libdbus-1-dev pkg-config` for the keyring.
 
 ```sh
-cd src-tauri
-cargo tauri dev      # run with live reload of ui/
-cargo tauri build    # installers in src-tauri/target/release/bundle/
+cargo run                # build and start the board
+cargo build --release    # the program is target/release/azure-devops-board
 ```
 
-There is no Node.js or npm step. The UI is plain HTML, CSS and JavaScript in `ui/`.
+The UI in `ui/` is plain HTML, CSS and JavaScript with no build step. It is embedded into the program at build time, so rebuild after changing it. There is no Node.js or npm step.
 
 ### Releasing (GitHub + Homebrew)
 
-Each OS's installer must be built on that OS, so releases are built in CI:
+Each OS's program must be built on that OS, so releases are built in CI:
 
-1. Push this folder to `github.com/aavishay/azure-devops-board` and create the tap repo `github.com/aavishay/homebrew-azure-devops-board` from `~/src/homebrew-azure-devops-board`.
-2. The workflow is `.github/workflows/release.yml`.
-3. Add a deploy key with **write access** to `homebrew-azure-devops-board`, and store its private key as the repo secret `TAP_DEPLOY_KEY`. Without it, releases still build but the cask is not updated.
-4. Tag and push: `git tag v1.0.0 && git push --tags`.
+1. The workflow is `.github/workflows/release.yml`.
+2. Add a deploy key with **write access** to `homebrew-azure-devops-board`, and store its private key as the repo secret `TAP_DEPLOY_KEY`. Without it, releases still build but the formula is not updated.
+3. Tag and push: `git tag v2.0.0 && git push --tags`. Tags must be plain versions like `v2.0.0`.
 
-The macOS job runs the tests, builds the universal `.dmg` and a zipped `.app`, and creates the release. The Linux AppImage and the Windows `setup.exe` come from `linux-appimage.yml` and `windows-nsis.yml`, which also run on every pull request as build checks, so a release builds exactly what PRs test. Each platform attaches its own `SHA256SUMS` file, and each publish step checks that its files really landed on the release. The cask job then sets the new version and sha256 in the cask (`scripts/update-cask.sh`). To re-cut an existing tag, run the release workflow by hand from the Actions tab.
+The macOS job runs the tests, builds a universal binary and creates the release. The Linux and Windows builds come from `linux.yml` and `windows.yml`, which also run on every pull request as build checks, so a release builds exactly what PRs test. Each build starts the program and checks that it serves the board. Each platform attaches its own `SHA256SUMS` file, and each publish step checks that its files really landed on the release. The formula job then sets the new version and checksums in the Homebrew formula (`scripts/update-formula.sh`). To re-cut an existing tag, run the release workflow by hand from the Actions tab.
 
-Tags must be plain versions like `v1.2.0`. `azure-pipelines.yml` builds the full set of installers (including `.msi`, `.deb` and `.rpm`) as Azure DevOps pipeline artifacts if you need those.
-
-Builds are unsigned. The cask clears the macOS quarantine flag on install, so Homebrew users don't see the Gatekeeper prompt; Windows SmartScreen will still warn once. To sign, see Tauri's [signing guides](https://v2.tauri.app/distribute/sign/).
+Builds are unsigned. Homebrew installs don't trigger Gatekeeper. If you download the macOS archive in a browser, clear the quarantine flag once: `xattr -d com.apple.quarantine azure-devops-board`.
 
 ## Testing
 
 ```sh
-cd src-tauri
-cargo test                                   # change tracking + name parsing
+cargo test                                     # server security, change tracking, sign-in, name parsing
 MOCK_ADO_URL=http://127.0.0.1:9090 cargo test  # also exercises the Azure DevOps client against a fake server
 ```
 
 ## Project layout
 
 ```
-ui/                    board UI (HTML/CSS/JS), talks to Rust via window.__TAURI__.core.invoke
-src-tauri/src/
-  lib.rs               Tauri commands: settings, sign-in/out, load/refresh board
-  auth.rs              PAT + Entra ID (PKCE, loopback redirect, token refresh)
-  board.rs             WIQL + workitemsbatch queries, snapshot, change log
-  secrets.rs           OS keychain storage (chunked for Windows limits)
-  settings.rs          settings model and defaults
+ui/                board UI (HTML/CSS/JS), calls POST /api/<command> on the local server
+src/
+  main.rs          the command: options, single instance, opening the browser
+  server.rs        local web server: embedded UI, API routes, request checks
+  app.rs           the commands: settings, sign-in/out, load/refresh board
+  auth.rs          PAT + Entra ID (PKCE, loopback redirect, token refresh)
+  board.rs         WIQL + workitemsbatch queries, snapshot, change log
+  secrets.rs       OS keychain storage (chunked for Windows limits)
+  settings.rs      settings model and defaults
 ```
