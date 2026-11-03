@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "azure-devops-board"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
