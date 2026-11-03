@@ -23,5 +23,6 @@ if ! grep -q "\"$MAC_SHA\"" "$tmp" || ! grep -q "\"$LINUX_SHA\"" "$tmp"; then
   echo "Could not find a sha256 line after each url in $FORMULA" >&2
   exit 1
 fi
-mv "$tmp" "$FORMULA"
+cat "$tmp" > "$FORMULA" # keeps the file's permissions, which mv from mktemp would not
+rm -f "$tmp"
 echo "Updated $FORMULA to $VER (macOS $MAC_SHA, Linux $LINUX_SHA)"
