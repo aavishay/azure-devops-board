@@ -7,6 +7,7 @@ mod board;
 mod secrets;
 mod server;
 mod settings;
+mod ticket;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
