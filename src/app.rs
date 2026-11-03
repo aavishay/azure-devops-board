@@ -10,6 +10,7 @@ use crate::auth::{self, AccessToken, KEY_PAT, KEY_REFRESH};
 use crate::board::{Ado, Change, Created, NewTicket, Snapshot, Store, TicketType};
 use crate::secrets::Secrets;
 use crate::settings::{AuthMode, Settings};
+use crate::ticket::{Ticket, TicketEdit};
 
 pub struct AppState {
     http: reqwest::Client,
@@ -320,6 +321,33 @@ pub async fn create_ticket(state: &AppState, ticket: NewTicket) -> Result<Create
     let types = ado.ticket_types().await?;
     let ty = types.iter().find(|t| t.name == ticket.kind).ok_or_else(|| format!("You can't create a {} in {}.", ticket.kind, s.project))?;
     ado.create(&ticket, ty).await
+}
+
+/// One ticket in full, for the ticket panel.
+pub async fn ticket(state: &AppState, id: u64) -> Result<Ticket, String> {
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.ticket(id).await
+}
+
+/// Saves a quick edit and returns the ticket as it is now. When someone else changed it
+/// first, the error says so and the UI opens it again.
+pub async fn update_ticket(state: &AppState, edit: TicketEdit) -> Result<Ticket, String> {
+    let (s, auth) = state.signed_in().await?;
+    let ado = Ado { http: &state.http, settings: &s, auth };
+    ado.edit(&edit).await?;
+    ado.ticket(edit.id).await
+}
+
+/// Adds a comment and returns the ticket with it.
+pub async fn add_comment(state: &AppState, id: u64, text: String) -> Result<Ticket, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("Write a comment first.".into());
+    }
+    let (s, auth) = state.signed_in().await?;
+    let ado = Ado { http: &state.http, settings: &s, auth };
+    ado.comment(id, text).await?;
+    ado.ticket(id).await
 }
 
 /* ---------------------------------------------------------------- state */

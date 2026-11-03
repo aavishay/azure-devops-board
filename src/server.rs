@@ -173,6 +173,18 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
             Ok(ticket) => to_json(app::create_ticket(s, ticket).await),
             Err(e) => Err(format!("Invalid ticket: {e}")),
         },
+        "ticket" => match id_arg(&args) {
+            Some(id) => to_json(app::ticket(s, id).await),
+            None => Err("Which ticket? The id is missing.".into()),
+        },
+        "update_ticket" => match serde_json::from_value(args.get("edit").cloned().unwrap_or(Value::Null)) {
+            Ok(edit) => to_json(app::update_ticket(s, edit).await),
+            Err(e) => Err(format!("Invalid change: {e}")),
+        },
+        "add_comment" => match id_arg(&args) {
+            Some(id) => to_json(app::add_comment(s, id, str_arg(&args, "text").unwrap_or_default()).await),
+            None => Err("Which ticket? The id is missing.".into()),
+        },
         _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Unknown command: {cmd}") }))).into_response(),
     };
     match r {
@@ -183,6 +195,10 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
 
 fn str_arg(args: &Value, name: &str) -> Option<String> {
     args.get(name).and_then(Value::as_str).map(str::to_string)
+}
+
+fn id_arg(args: &Value) -> Option<u64> {
+    args.get("id").and_then(Value::as_u64)
 }
 
 fn to_json<T: serde::Serialize>(r: Result<T, String>) -> Result<Value, String> {
@@ -297,6 +313,11 @@ mod tests {
         let unset = call("ticket_types", json!({})).await.unwrap();
         assert_eq!(unset.status(), 400);
         assert!(unset.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("Settings"));
+        let no_id = call("ticket", json!({ "id": "12" })).await.unwrap();
+        assert_eq!(no_id.status(), 400);
+        assert!(no_id.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("id is missing"));
+        let blank = call("add_comment", json!({ "id": 12, "text": "  " })).await.unwrap();
+        assert!(blank.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("comment"));
         assert_eq!(call("no_such_thing", json!({})).await.unwrap().status(), 404);
     }
 }
