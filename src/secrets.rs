@@ -21,7 +21,7 @@ impl Secrets {
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        match keyring_get(key) {
+        match blocking(|| keyring_get(key)) {
             Ok(Some(v)) => Some(v),
             Ok(None) => self.file_map().remove(key),
             Err(_) => self.file_map().remove(key),
@@ -29,7 +29,7 @@ impl Secrets {
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        match keyring_set(key, value) {
+        match blocking(|| keyring_set(key, value)) {
             Ok(()) => {
                 // Make sure no stale copy is left in the fallback file.
                 let mut m = self.file_map();
@@ -48,7 +48,7 @@ impl Secrets {
     }
 
     pub fn delete(&self, key: &str) {
-        let _ = keyring_delete(key);
+        let _ = blocking(|| keyring_delete(key));
         let mut m = self.file_map();
         if m.remove(key).is_some() {
             let _ = self.write_file_map(&m);
@@ -74,6 +74,17 @@ impl Secrets {
             let _ = std::fs::set_permissions(&self.fallback_file, std::fs::Permissions::from_mode(0o600));
         }
         Ok(())
+    }
+}
+
+/// A keychain call can wait on a system dialog for as long as the user takes. On the
+/// server's multi-threaded runtime, hand this thread's other work to another thread
+/// meanwhile, so the board keeps answering.
+fn blocking<T>(f: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        _ => f(),
     }
 }
 
