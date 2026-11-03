@@ -1,26 +1,17 @@
-//! DevOps Team Board: Tauri backend.
-//!
-//! The web UI (../ui) calls these commands through `window.__TAURI__.core.invoke`.
+//! The board's commands. The web UI (../ui) calls them as `POST /api/<command>` (see server.rs).
 //! All Azure DevOps traffic and credentials stay in this Rust process.
 
-mod auth;
-mod board;
-mod secrets;
-mod settings;
-
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tauri::{Manager, State};
-use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex;
 
-use auth::{AccessToken, KEY_PAT, KEY_REFRESH};
-use board::{Ado, Change, Snapshot, Store};
-use secrets::Secrets;
-use settings::{AuthMode, Settings};
+use crate::auth::{self, AccessToken, KEY_PAT, KEY_REFRESH};
+use crate::board::{Ado, Change, Snapshot, Store};
+use crate::secrets::Secrets;
+use crate::settings::{AuthMode, Settings};
 
-struct AppState {
+pub struct AppState {
     http: reqwest::Client,
     settings_path: PathBuf,
     settings: Mutex<Settings>,
@@ -37,14 +28,14 @@ struct AppState {
 }
 
 #[derive(Clone, Serialize)]
-struct ErrorInfo {
+pub struct ErrorInfo {
     at: String,
     message: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AuthStatus {
+pub struct AuthStatus {
     mode: AuthMode,
     signed_in: bool,
     user: Option<String>,
@@ -55,7 +46,7 @@ struct AuthStatus {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BoardPayload {
+pub struct BoardPayload {
     title: String,
     subtitle: String,
     board_url: String,
@@ -71,7 +62,7 @@ struct BoardPayload {
 }
 
 #[derive(Serialize)]
-struct RefreshResult {
+pub struct RefreshResult {
     ok: bool,
     skipped: bool,
     changes: Vec<Change>,
@@ -151,13 +142,11 @@ impl AppState {
 
 /* ------------------------------------------------------------- commands */
 
-#[tauri::command]
-async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+pub async fn get_settings(state: &AppState) -> Result<Settings, String> {
     Ok(state.settings.lock().await.clone())
 }
 
-#[tauri::command]
-async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
+pub async fn save_settings(state: &AppState, settings: Settings) -> Result<Settings, String> {
     let s = settings.normalized();
     s.save(&state.settings_path)?;
     let mut cur = state.settings.lock().await;
@@ -171,14 +160,12 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result
     Ok(s)
 }
 
-#[tauri::command]
-async fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+pub async fn auth_status(state: &AppState) -> Result<AuthStatus, String> {
     Ok(state.status().await)
 }
 
 /// Validates a PAT against the organization, then stores it in the OS keychain.
-#[tauri::command]
-async fn save_pat(state: State<'_, AppState>, pat: String) -> Result<AuthStatus, String> {
+pub async fn save_pat(state: &AppState, pat: String) -> Result<AuthStatus, String> {
     let pat = pat.trim().to_string();
     if pat.is_empty() {
         return Err("Paste a Personal Access Token first.".into());
@@ -198,12 +185,11 @@ async fn save_pat(state: State<'_, AppState>, pat: String) -> Result<AuthStatus,
 }
 
 /// Opens the system browser for Microsoft sign-in and waits for the redirect.
-#[tauri::command]
-async fn sign_in_microsoft(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<AuthStatus, String> {
+pub async fn sign_in_microsoft(state: &AppState) -> Result<AuthStatus, String> {
     let _guard = state.signing_in.try_lock().map_err(|_| "A sign-in is already open in your browser.".to_string())?;
     let s = state.settings.lock().await.clone();
     let pending = auth::begin_sign_in(&s).await?;
-    app.opener().open_url(pending.url.clone(), None::<&str>).map_err(|e| format!("Could not open the browser: {e}"))?;
+    open::that_detached(&pending.url).map_err(|e| format!("Could not open the browser: {e}"))?;
     let (at, rt) = tokio::select! {
         r = pending.complete(&state.http, &s) => r?,
         _ = state.cancel_sign_in.notified() => return Err("Sign-in cancelled.".into()),
@@ -224,14 +210,12 @@ async fn sign_in_microsoft(app: tauri::AppHandle, state: State<'_, AppState>) ->
     Ok(state.status().await)
 }
 
-#[tauri::command]
-async fn cancel_sign_in(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn cancel_sign_in(state: &AppState) -> Result<(), String> {
     state.cancel_sign_in.notify_waiters();
     Ok(())
 }
 
-#[tauri::command]
-async fn sign_out(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+pub async fn sign_out(state: &AppState) -> Result<AuthStatus, String> {
     state.secrets.delete(KEY_PAT);
     state.secrets.delete(KEY_REFRESH);
     *state.token.lock().await = None;
@@ -239,8 +223,7 @@ async fn sign_out(state: State<'_, AppState>) -> Result<AuthStatus, String> {
     Ok(state.status().await)
 }
 
-#[tauri::command]
-async fn load_board(state: State<'_, AppState>) -> Result<BoardPayload, String> {
+pub async fn load_board(state: &AppState) -> Result<BoardPayload, String> {
     let s = state.settings.lock().await.clone();
     let store = state.store.lock().await;
     let snapshot = store.snapshot.clone().filter(|sn| sn.scope == scope_of(&s));
@@ -260,8 +243,7 @@ async fn load_board(state: State<'_, AppState>) -> Result<BoardPayload, String> 
     })
 }
 
-#[tauri::command]
-async fn refresh_board(state: State<'_, AppState>, reason: Option<String>) -> Result<RefreshResult, String> {
+pub async fn refresh_board(state: &AppState, reason: Option<String>) -> Result<RefreshResult, String> {
     let reason = reason.unwrap_or_else(|| "manual".into());
     let mut last = state.refresh_lock.lock().await; // held for the whole refresh
     if reason == "manual" {
@@ -307,50 +289,33 @@ async fn refresh_board(state: State<'_, AppState>, reason: Option<String>) -> Re
     }
 }
 
-/* ------------------------------------------------------------------ app */
+/* ---------------------------------------------------------------- state */
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            let config_dir = app.path().app_config_dir()?;
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&config_dir)?;
-            std::fs::create_dir_all(&data_dir)?;
-            let settings_path = config_dir.join("settings.json");
-            let settings = Settings::load(&settings_path);
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .user_agent(concat!("DevOpsBoard/", env!("CARGO_PKG_VERSION")))
-                .build()?;
-            app.manage(AppState {
-                http,
-                settings_path,
-                settings: Mutex::new(settings),
-                secrets: Secrets::new(data_dir.join("credentials.fallback.json")),
-                token: Mutex::new(None),
-                user: Mutex::new(None),
-                store: Mutex::new(Store::open(data_dir.join("board"))),
-                last_error: Mutex::new(None),
-                refresh_lock: Mutex::new(None),
-                signing_in: Mutex::new(()),
-                cancel_sign_in: tokio::sync::Notify::new(),
-            });
-            Ok(())
+impl AppState {
+    /// Loads settings from `config_dir` and the board cache and credential fallback from `data_dir`.
+    pub fn new(config_dir: &Path, data_dir: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(config_dir).map_err(|e| format!("Could not create {}: {e}", config_dir.display()))?;
+        std::fs::create_dir_all(data_dir).map_err(|e| format!("Could not create {}: {e}", data_dir.display()))?;
+        let settings_path = config_dir.join("settings.json");
+        let settings = Settings::load(&settings_path);
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("DevOpsBoard/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(AppState {
+            http,
+            settings_path,
+            settings: Mutex::new(settings),
+            secrets: Secrets::new(data_dir.join("credentials.fallback.json")),
+            token: Mutex::new(None),
+            user: Mutex::new(None),
+            store: Mutex::new(Store::open(data_dir.join("board"))),
+            last_error: Mutex::new(None),
+            refresh_lock: Mutex::new(None),
+            signing_in: Mutex::new(()),
+            cancel_sign_in: tokio::sync::Notify::new(),
         })
-        .invoke_handler(tauri::generate_handler![
-            get_settings,
-            save_settings,
-            auth_status,
-            save_pat,
-            sign_in_microsoft,
-            cancel_sign_in,
-            sign_out,
-            load_board,
-            refresh_board
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Azure DevOps Board");
+    }
 }
