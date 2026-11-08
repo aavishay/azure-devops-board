@@ -261,9 +261,19 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;ba
 /* ---- ticket panel ---- */
 .card[data-ticket]{cursor:pointer}
 .card[data-ticket]:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
-dialog.tk-dlg{max-width:min(820px,calc(100vw - 32px))}
+.card.is-open{box-shadow:0 0 0 2px var(--accent);border-radius:4px}
+/* A side drawer, not a modal: the board stays usable, and on wide screens it moves over to make room. */
+:root{--drawer-w:min(600px,100vw)}
+dialog#ticket{position:fixed;inset:0 0 0 auto;margin:0;width:var(--drawer-w);max-width:none;height:100vh;height:100dvh;max-height:none;border:0;border-left:1px solid var(--line);border-radius:0;box-shadow:-12px 0 40px rgba(0,0,0,.18);z-index:50;animation:tk-in .18s ease-out}
+@keyframes tk-in{from{transform:translateX(24px);opacity:0}}
+@media (prefers-reduced-motion:reduce){dialog#ticket{animation:none}}
+dialog#ticket .dlg.tk{max-height:none;height:100%;box-sizing:border-box;overflow:auto;padding-top:0}
+@media (min-width:1100px){
+  .wrap{transition:margin-right .18s ease-out}
+  body.drawer-open .wrap{margin-right:var(--drawer-w)}
+}
 .tk{gap:12px}
-.tk-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tk-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:1;background:var(--surface);padding:14px 0 10px;border-bottom:1px solid var(--line)}
 .tk-kind{display:inline-block;padding:2px 7px;border-radius:3px;font-size:11.5px;color:#fff;background:var(--t-other)}
 .tk-kind.k-incident{background:var(--t-incident)} .tk-kind.k-pbi{background:var(--t-pbi)} .tk-kind.k-task{background:var(--t-task)} .tk-kind.k-bug{background:var(--t-bug)}
 .tk-links .tk-kind{background:none;color:var(--muted);padding:0}
