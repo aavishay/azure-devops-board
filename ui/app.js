@@ -117,7 +117,8 @@
       : "";
     const dupLines = t.dups.map((d) =>
       `<div class="dup" title="Linked in Azure DevOps as a duplicate of #${esc(t.id)}">Duplicate <a href="${esc(d.url)}" target="_blank" rel="noopener" data-ticket="${esc(d.id)}">#${esc(d.id)}</a> ${esc(d.title)}${d.rawState !== t.rawState ? ` <span class="ps">(${esc(d.rawState)})</span>` : ""}</div>`).join("");
-    return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}" data-ticket="${esc(t.id)}" tabindex="0" aria-label="Open #${esc(t.id)}: ${esc(t.title)}">
+    const open = TK?.id === t.id && $("ticket").open;
+    return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}${open ? " is-open" : ""}" data-ticket="${esc(t.id)}" tabindex="0" aria-label="Open #${esc(t.id)}: ${esc(t.title)}">
       <div class="tab"><a class="id" href="${esc(t.url)}" target="_blank" rel="noopener" data-ticket="${esc(t.id)}" title="Open here; Cmd/Ctrl-click opens Azure DevOps">${esc(t.id)}</a><span class="kind">${esc(t.type)}</span>${flags}<span class="pri${t.p === 1 ? " p1" : ""}" title="Priority ${esc(t.p)}">P${esc(t.p)}</span></div>
       <div class="body">
         <div class="title">${esc(t.title)}</div>
@@ -571,13 +572,34 @@
   const tkKind = (type) => ({ Incident: "incident", "Product Backlog Item": "pbi", PBI: "pbi", Task: "task", Bug: "bug" }[type] || "other");
   const tkLink = (l) => `<li><button class="linkbtn" type="button" data-ticket="${esc(l.id)}">#${esc(l.id)}</button> <span class="tk-kind">${esc(l.type)}</span> ${esc(l.title)}${l.state ? ` <span class="ps">(${esc(l.state)})</span>` : ""}</li>`;
 
-  async function openTicket(id, { push = false, keepBack = false } = {}) {
+  let tkOpener = null;      // what had focus before the drawer opened, to return to
+  // Unsaved quick edits are only thrown away with the user's say-so.
+  function tkLeave() {
+    const n = Object.keys(tkChanges()).length;
+    return !n || confirm(`Discard your unsaved change${n > 1 ? "s" : ""} to #${TK.id}?`);
+  }
+  function markOpen(id) {
+    for (const c of document.querySelectorAll("article.card.is-open")) c.classList.remove("is-open");
+    if (id) for (const c of document.querySelectorAll(`article.card[data-ticket="${id}"]`)) c.classList.add("is-open");
+  }
+  function closeTicket() { if ($("ticket").open && tkLeave()) $("ticket").close(); }
+
+  async function openTicket(id, { push = false, back = false } = {}) {
     const dlg = $("ticket");
-    if (push && TK && TK.id !== id) tkBack.push(TK.id);
-    else if (!push && !keepBack) tkBack.length = 0;
+    if (dlg.open && TK?.id === id) return;
+    if (dlg.open && !tkLeave()) return;
+    if (back) tkBack.pop();
+    else if (push && TK && TK.id !== id) tkBack.push(TK.id);
+    else if (!push) tkBack.length = 0;
     TK = { id, loading: true };
     $("tk").innerHTML = `<div class="tk-top"><span class="tk-id">#${esc(id)}</span><span style="flex:1"></span><button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button></div><p class="muted">Loading #${esc(id)} from Azure DevOps…</p>`;
-    if (!dlg.open) dlg.showModal();
+    $("tk").scrollTop = 0;
+    if (!dlg.open) {
+      tkOpener = document.activeElement;
+      dlg.show();
+      document.body.classList.add("drawer-open");
+    }
+    markOpen(id);
     try {
       const t = await invoke("ticket", { id });
       if (TK?.id === id) renderTicket(t);
@@ -776,10 +798,10 @@
   $("newCancel").addEventListener("click", () => $("newTicket").close()); // keeps what was typed for next time
   $("newForm").elements.namedItem("type").addEventListener("change", typeChanged);
   $("newForm").addEventListener("submit", createTicket);
-  // N opens "New ticket", unless typing somewhere or a dialog is open.
+  // N opens "New ticket", unless typing somewhere or a modal dialog is open (the ticket drawer isn't one).
   document.addEventListener("keydown", (e) => {
     if (e.key.toLowerCase() !== "n" || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
-    if (e.target.closest?.("input,textarea,select,[contenteditable]") || document.querySelector("dialog[open]")) return;
+    if (e.target.closest?.("input,textarea,select,[contenteditable]") || document.querySelector("dialog:modal")) return;
     e.preventDefault();
     openNewTicket();
   });
@@ -792,16 +814,26 @@
     if (a && a !== el && !a.dataset.ticket) return; // some other link inside a card
     if (!a && String(getSelection()).trim()) return;
     e.preventDefault();
-    openTicket(Number(el.dataset.ticket), { push: $("ticket").open });
+    // Links inside the drawer keep a way back; a card on the board starts afresh.
+    openTicket(Number(el.dataset.ticket), { push: !!e.target.closest("#tk") });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.matches?.("article.card[data-ticket]")) { e.preventDefault(); openTicket(Number(e.target.dataset.ticket)); }
+    // The drawer isn't modal, so Escape doesn't close it by itself.
+    if (e.key === "Escape" && $("ticket").open && !document.querySelector("dialog:modal")) { e.preventDefault(); closeTicket(); }
+  });
+  $("ticket").addEventListener("close", () => {
+    document.body.classList.remove("drawer-open");
+    markOpen(null);
+    tkBack.length = 0;
+    if (tkOpener?.isConnected) tkOpener.focus();
+    tkOpener = null;
   });
   $("tk").addEventListener("click", (e) => {
     const b = e.target.closest("[data-tk]"); if (!b) return;
     const what = b.dataset.tk;
-    if (what === "close") $("ticket").close();
-    else if (what === "back" && tkBack.length) openTicket(tkBack.pop(), { push: false, keepBack: true });
+    if (what === "close") closeTicket();
+    else if (what === "back" && tkBack.length) openTicket(tkBack[tkBack.length - 1], { back: true });
     else if (what === "save") tkSave();
     else if (what === "discard") renderTicket(TK);
     else if (what === "comment") tkComment();
