@@ -17,7 +17,7 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 | **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, search, and hiding people you don't need to see. |
 | **Changes** | An Added tag for the last 24 hours, plus a Recent changes log kept on this computer. |
 | **Refresh** | Automatic every 10 minutes (configurable). Also when you return to the tab and the data is stale, and on demand with Refresh or Cmd/Ctrl+R. |
-| **Tickets** | Click a card or any `#number` to open the ticket in a side drawer, with the board still usable beside it (click another card to switch; Esc closes): description or repro steps, key fields, parent and children, discussion and recent history. Change its state, assignee or priority, or add a comment, without opening Azure DevOps. If someone else changed it since you opened it, your save is refused rather than overwriting theirs. Cmd/Ctrl-click opens it in Azure DevOps instead. |
+| **Tickets** | Click a card or any `#number` to open the ticket in a side drawer, with the board still usable beside it (click another card to switch; Esc closes): description or repro steps, key fields, parent and children, discussion and recent history. Change its state, assignee, priority or estimate (Effort, Story points or Remaining work, whichever the type has), or add a comment, without opening Azure DevOps. If the process needs a field for a state, such as Effort before Committed, the panel says so and takes you to it. If someone else changed it since you opened it, your save is refused rather than overwriting theirs. Cmd/Ctrl-click opens it in Azure DevOps instead. |
 | **New tickets** | **+ New ticket** (or press **N**) creates a work item without opening Azure DevOps: any of the project's types, with title, description, priority, assignee and parent. It goes to the board's area path, and the board refreshes to show it (in the New lane, if that's on). |
 | **Sign-in** | **Sign in with Microsoft** (Entra ID, browser-based, with automatic token renewal), or a **Personal Access Token**. |
 | **Security** | Credentials live in the OS keychain. The local server only answers the tab it opened (see *Security*). |
@@ -165,5 +165,5 @@ src/
   board.rs         WIQL + workitemsbatch queries, creating work items, snapshot, change log
   secrets.rs       OS keychain storage (chunked for Windows limits)
   settings.rs      settings model and defaults
-  ticket.rs        one ticket in full for the ticket panel; quick edits and comments
+  ticket.rs        one ticket in full for the ticket panel; quick edits, estimates and comments
 ```

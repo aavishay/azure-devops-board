@@ -1,5 +1,7 @@
 //! One ticket in full, for the ticket panel: fields, rich text, links, discussion and
-//! history, plus the quick edits (state, assignee, priority) and new comments.
+//! history, plus the quick edits (state, assignee, priority, estimates) and new comments.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,8 +22,19 @@ const TRACKED: &[(&str, &str)] = &[
     ("System.State", "State"),
     ("System.AssignedTo", "Assigned to"),
     ("Microsoft.VSTS.Common.Priority", "Priority"),
+    ("Microsoft.VSTS.Scheduling.Effort", "Effort"),
+    ("Microsoft.VSTS.Scheduling.StoryPoints", "Story points"),
+    ("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining work"),
     ("System.IterationPath", "Iteration"),
     ("System.Title", "Title"),
+];
+
+/// Estimate fields the panel can edit, shown for the types that have them. Processes
+/// often require one before work is committed (Effort on a Scrum backlog item).
+const NUMBERS: &[(&str, &str)] = &[
+    ("Microsoft.VSTS.Scheduling.Effort", "Effort"),
+    ("Microsoft.VSTS.Scheduling.StoryPoints", "Story points"),
+    ("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining work"),
 ];
 
 const COMMENTS_API: &str = "api-version=7.1-preview.4";
@@ -41,6 +54,8 @@ pub struct Ticket {
     pub assigned_to: Option<Person>,
     pub priority: Option<i64>,
     pub has_priority: bool,
+    /// The estimate fields this type has, with their values.
+    pub numbers: Vec<NumberField>,
     pub area: String,
     pub iteration: String,
     pub tags: Vec<String>,
@@ -66,6 +81,14 @@ pub struct Ticket {
 pub struct Person {
     pub name: String,
     pub unique: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NumberField {
+    /// The field's reference name, which an edit sends back.
+    pub field: String,
+    pub label: String,
+    pub value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +147,9 @@ pub struct TicketEdit {
     pub assigned_to: Option<String>,
     #[serde(default)]
     pub priority: Option<i64>,
+    /// Estimate fields by reference name; `None` clears one.
+    #[serde(default)]
+    pub numbers: BTreeMap<String, Option<f64>>,
 }
 
 pub const STALE: &str = "Someone changed this ticket since you opened it, so nothing was saved. It now shows the latest; make your change again.";
@@ -161,13 +187,20 @@ impl Ado<'_> {
             vec![]
         });
         let state = f["System.State"].as_str().unwrap_or("").to_string();
-        let (states, has_priority) = match &ty {
+        let (states, has) = match &ty {
             Ok(t) => type_info(t),
             Err(_) => {
                 missing.push("the list of states".into());
-                (vec![], f.get(PRIORITY).is_some())
+                // Without the type, offer the fields this ticket has a value in.
+                (vec![], f.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default())
             }
         };
+        let has_priority = has.iter().any(|k| k == PRIORITY);
+        let numbers = NUMBERS
+            .iter()
+            .filter(|(k, _)| has.iter().any(|h| h == k))
+            .map(|(k, label)| NumberField { field: k.to_string(), label: label.to_string(), value: f[*k].as_f64() })
+            .collect();
         let comments = match &comments {
             Ok(c) => parse_comments(c),
             Err(_) => {
@@ -194,6 +227,7 @@ impl Ado<'_> {
             assigned_to: assigned_full.map(|name| Person { name, unique: f["System.AssignedTo"]["uniqueName"].as_str().filter(|u| !u.is_empty()).map(String::from) }),
             priority: f[PRIORITY].as_i64(),
             has_priority,
+            numbers,
             area: s("System.AreaPath").unwrap_or_default(),
             iteration: s("System.IterationPath").unwrap_or_default(),
             tags: f["System.Tags"].as_str().map(|t| t.split(';').map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect()).unwrap_or_default(),
@@ -219,7 +253,7 @@ impl Ado<'_> {
 
     /// Applies a quick edit, refusing it if the ticket changed since `edit.rev`.
     pub async fn edit(&self, edit: &TicketEdit) -> Result<(), String> {
-        let ops = edit_ops(edit);
+        let ops = edit_ops(edit)?;
         if ops.len() < 2 {
             return Err("Nothing to save: no field changed.".into());
         }
@@ -236,6 +270,12 @@ impl Ado<'_> {
                 let now = self.call(reqwest::Method::GET, format!("{api}/wit/workitems/{}?fields=System.Rev&api-version=7.1", edit.id), None).await;
                 if now.is_ok_and(|w| w["rev"].as_u64().is_some_and(|r| r != edit.rev)) {
                     Err(STALE.into())
+                } else if let Some(field) = required_field(&e) {
+                    Err(if NUMBERS.iter().any(|(_, l)| *l == field) {
+                        format!("Azure DevOps needs {field} filled in for this change, so nothing was saved. Fill in {field} and save again.")
+                    } else {
+                        format!("Azure DevOps needs {field} filled in for this change, so nothing was saved. Set it in Azure DevOps first.")
+                    })
                 } else {
                     Err(write_error(e))
                 }
@@ -271,16 +311,24 @@ fn hierarchy(relations: &Value) -> (Option<u64>, Vec<u64>) {
     (parent, children)
 }
 
-/// The type's states in workflow order, and whether it has a priority field.
-fn type_info(t: &Value) -> (Vec<StateInfo>, bool) {
+/// The type's states in workflow order, and the reference names of its fields.
+fn type_info(t: &Value) -> (Vec<StateInfo>, Vec<String>) {
     let states = t["states"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|s| Some(StateInfo { name: s["name"].as_str()?.to_string(), category: s["category"].as_str().unwrap_or("").to_string() }))
         .collect();
-    let has_priority = t["fields"].as_array().into_iter().flatten().any(|f| f["referenceName"].as_str() == Some(PRIORITY));
-    (states, has_priority)
+    let fields = t["fields"].as_array().into_iter().flatten().filter_map(|f| f["referenceName"].as_str().map(String::from)).collect();
+    (states, fields)
+}
+
+/// Azure DevOps names a missing required field like "TF401320: Rule Error for field
+/// Effort. Error code: Required, InvalidEmpty." Say which field, in plain words.
+fn required_field(e: &str) -> Option<&str> {
+    let rest = &e[e.find("Rule Error for field ")? + "Rule Error for field ".len()..];
+    let (field, code) = rest.split_once(". Error code: ")?;
+    code.starts_with("Required").then_some(field.trim()).filter(|f| !f.is_empty())
 }
 
 fn parse_comments(v: &Value) -> Vec<Comment> {
@@ -303,6 +351,8 @@ fn shown(v: &Value) -> Option<String> {
         Value::String(s) if s.is_empty() => None,
         Value::String(s) => Some(s.clone()),
         Value::Object(_) => owner_of(v).1,
+        // Estimates come back as 3.0; show 3.
+        Value::Number(n) if n.as_f64().is_some_and(|f| f.fract() == 0.0 && f.abs() < 1e15) => Some(format!("{}", n.as_f64().unwrap() as i64)),
         other => Some(other.to_string()),
     }
 }
@@ -337,7 +387,7 @@ fn history(updates: &Value) -> Vec<HistoryEntry> {
     out
 }
 
-fn edit_ops(e: &TicketEdit) -> Vec<Value> {
+fn edit_ops(e: &TicketEdit) -> Result<Vec<Value>, String> {
     let mut ops = vec![json!({ "op": "test", "path": "/rev", "value": e.rev })];
     if let Some(s) = e.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         ops.push(json!({ "op": "add", "path": "/fields/System.State", "value": s }));
@@ -350,7 +400,17 @@ fn edit_ops(e: &TicketEdit) -> Vec<Value> {
     if let Some(p) = e.priority {
         ops.push(json!({ "op": "add", "path": format!("/fields/{PRIORITY}"), "value": p }));
     }
-    ops
+    for (field, value) in &e.numbers {
+        let Some((_, label)) = NUMBERS.iter().find(|(k, _)| k == field) else {
+            return Err(format!("The board can't change the field {field}."));
+        };
+        match value {
+            None => ops.push(json!({ "op": "remove", "path": format!("/fields/{field}") })),
+            Some(v) if v.is_finite() && *v >= 0.0 => ops.push(json!({ "op": "add", "path": format!("/fields/{field}"), "value": v })),
+            Some(_) => return Err(format!("{label} must be a number, 0 or more.")),
+        }
+    }
+    Ok(ops)
 }
 
 #[cfg(test)]
@@ -395,24 +455,39 @@ mod tests {
 
     #[test]
     fn edit_patch() {
-        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1) };
-        let ops = edit_ops(&e);
+        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new() };
+        let ops = edit_ops(&e).unwrap();
         assert_eq!(ops[0], json!({ "op": "test", "path": "/rev", "value": 7 }));
         assert_eq!(ops[1], json!({ "op": "add", "path": "/fields/System.State", "value": "Done" }));
         assert_eq!(ops[2], json!({ "op": "remove", "path": "/fields/System.AssignedTo" }));
         assert_eq!(ops[3]["value"], 1);
         let who = TicketEdit { state: None, assigned_to: Some("sam.roe@example.com".into()), priority: None, ..e };
-        assert_eq!(edit_ops(&who)[1], json!({ "op": "add", "path": "/fields/System.AssignedTo", "value": "sam.roe@example.com" }));
-        assert_eq!(edit_ops(&TicketEdit { assigned_to: None, ..who }).len(), 1, "only the rev test: nothing to save");
+        assert_eq!(edit_ops(&who).unwrap()[1], json!({ "op": "add", "path": "/fields/System.AssignedTo", "value": "sam.roe@example.com" }));
+        let none = TicketEdit { assigned_to: None, ..who };
+        assert_eq!(edit_ops(&none).unwrap().len(), 1, "only the rev test: nothing to save");
+
+        let num = |k: &str, v: Option<f64>| TicketEdit { numbers: BTreeMap::from([(k.to_string(), v)]), ..none.clone() };
+        assert_eq!(edit_ops(&num("Microsoft.VSTS.Scheduling.Effort", Some(3.0))).unwrap()[1], json!({ "op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.Effort", "value": 3.0 }));
+        assert_eq!(edit_ops(&num("Microsoft.VSTS.Scheduling.Effort", None)).unwrap()[1], json!({ "op": "remove", "path": "/fields/Microsoft.VSTS.Scheduling.Effort" }));
+        assert!(edit_ops(&num("Microsoft.VSTS.Scheduling.Effort", Some(-1.0))).unwrap_err().contains("Effort"));
+        assert!(edit_ops(&num("System.Title", Some(1.0))).is_err(), "only the estimate fields");
+    }
+
+    #[test]
+    fn required_field_errors() {
+        assert_eq!(required_field("Azure DevOps 400: TF401320: Rule Error for field Effort. Error code: Required, InvalidEmpty."), Some("Effort"));
+        assert_eq!(required_field("TF401320: Rule Error for field Story Points. Error code: Required, InvalidEmpty."), Some("Story Points"));
+        assert_eq!(required_field("TF401320: Rule Error for field State. Error code: InvalidListValue."), None);
+        assert_eq!(required_field("TF401320: Rule Error for field State"), None);
     }
 
     #[test]
     fn type_states_and_priority() {
         let t = json!({ "states": [{ "name": "New", "category": "Proposed" }, { "name": "Done", "category": "Completed" }], "fields": [{ "referenceName": PRIORITY }] });
-        let (s, p) = type_info(&t);
+        let (s, f) = type_info(&t);
         assert_eq!(s.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["New", "Done"]);
-        assert!(p);
-        assert!(!type_info(&json!({})).1);
+        assert_eq!(f, [PRIORITY]);
+        assert!(type_info(&json!({})).1.is_empty());
     }
 
     /// Loads and edits a ticket on a fake Azure DevOps whose copy is at revision 4.
@@ -428,7 +503,8 @@ mod tests {
                         "System.AssignedTo": { "displayName": "Sam Roe", "uniqueName": "sam.roe@example.com" },
                         "Microsoft.VSTS.TCM.ReproSteps": "<p>Sign out, then in</p>", "System.Description": "" },
                     "relations": [{ "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "http://x/_apis/wit/workItems/10" }] }),
-                ("GET", p) if p.ends_with("/wit/workitemtypes/Bug") => json!({ "states": [{ "name": "New" }, { "name": "Done" }], "fields": [{ "referenceName": PRIORITY }] }),
+                ("GET", p) if p.ends_with("/wit/workitemtypes/Bug") => json!({ "states": [{ "name": "New" }, { "name": "Committed" }, { "name": "Done" }],
+                    "fields": [{ "referenceName": PRIORITY }, { "referenceName": "Microsoft.VSTS.Scheduling.Effort" }, { "referenceName": "System.Title" }] }),
                 ("GET", p) if p.ends_with("/comments") => json!({ "comments": [{ "createdBy": { "displayName": "Alex Doe" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" }] }),
                 ("GET", p) if p.ends_with("/updates") => json!({ "value": [] }),
                 ("POST", p) if p.ends_with("/workitemsbatch") => json!({ "value": [{ "id": 10, "fields": { "System.Title": "Auth rework", "System.State": "Committed", "System.WorkItemType": "Product Backlog Item" } }] }),
@@ -436,6 +512,10 @@ mod tests {
                     let ops: Value = serde_json::from_slice(&body).unwrap();
                     if ops[0]["value"] != 4 {
                         return (StatusCode::PRECONDITION_FAILED, axum::Json(json!({ "message": "TF26071: changed by someone else" }))).into_response();
+                    }
+                    let effort = ops.as_array().unwrap().iter().any(|o| o["path"] == "/fields/Microsoft.VSTS.Scheduling.Effort" && o["op"] == "add");
+                    if ops[1]["value"] == "Committed" && !effort {
+                        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "message": "TF401320: Rule Error for field Effort. Error code: Required, InvalidEmpty." }))).into_response();
                     }
                     if ops[1]["value"] == "Bogus" {
                         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "message": "TF401320: Rule Error for field State" }))).into_response();
@@ -458,17 +538,22 @@ mod tests {
         assert_eq!(t.assigned_to, Some(Person { name: "Sam Roe".into(), unique: Some("sam.roe@example.com".into()) }));
         assert_eq!(t.tags, ["web", "auth"]);
         assert_eq!(t.sections.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Repro steps"], "empty Description is left out");
-        assert_eq!(t.states.len(), 2);
+        assert_eq!(t.states.len(), 3);
         assert!(t.has_priority);
+        assert_eq!(t.numbers, [NumberField { field: "Microsoft.VSTS.Scheduling.Effort".into(), label: "Effort".into(), value: None }], "only the estimates the type has");
         assert_eq!(t.parent.as_ref().map(|p| (p.id, p.title.as_str())), Some((10, "Auth rework")));
         assert_eq!(t.comments[0].author, "Alex Doe");
         assert!(t.missing.is_empty(), "{:?}", t.missing);
 
-        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None };
+        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new() };
         ado.edit(&edit(4, "Done")).await.unwrap();
         assert_eq!(ado.edit(&edit(3, "Done")).await.unwrap_err(), STALE);
         let rule = ado.edit(&edit(4, "Bogus")).await.unwrap_err();
         assert!(rule.contains("TF401320"), "{rule}");
+        let needs = ado.edit(&edit(4, "Committed")).await.unwrap_err();
+        assert!(needs.starts_with("Azure DevOps needs Effort filled in") && needs.ends_with("Fill in Effort and save again."), "{needs}");
+        let with = TicketEdit { numbers: BTreeMap::from([("Microsoft.VSTS.Scheduling.Effort".to_string(), Some(5.0))]), ..edit(4, "Committed") };
+        ado.edit(&with).await.unwrap();
     }
 
     #[test]
