@@ -639,6 +639,7 @@
         <label>State<select data-f="state">${states}</select></label>
         <label>Assigned to<select data-f="assignedTo">${who}</select></label>
         ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
+        ${t.numbers.map((n) => `<label class="num">${esc(n.label)}<input type="number" min="0" step="any" inputmode="decimal" data-n="${esc(n.field)}" value="${n.value ?? ""}" placeholder="—"></label>`).join("")}
         <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
       </div>
       <p class="err" id="tkErr" role="alert" hidden></p>
@@ -681,6 +682,15 @@
     if (who.value !== was) out.assignedTo = who.value;
     const p = tkField("priority");
     if (p && p.value && Number(p.value) !== TK.priority) out.priority = Number(p.value);
+    // Estimates: a changed number is sent, a cleared one is sent as null (removed).
+    const nums = {};
+    for (const n of TK.numbers || []) {
+      const el = $("tk").querySelector(`[data-n="${CSS.escape(n.field)}"]`);
+      if (!el) continue;
+      const v = el.value.trim() === "" ? null : Number(el.value);
+      if (v !== (n.value ?? null) && !(v !== null && Number.isNaN(v))) nums[n.field] = v;
+    }
+    if (Object.keys(nums).length) out.numbers = nums;
     return out;
   }
   function tkDirty() { $("tk").querySelector(".tk-save").hidden = !Object.keys(tkChanges()).length; }
@@ -699,6 +709,10 @@
         try { renderTicket(await invoke("ticket", { id: TK.id })); } catch {}
       } else { btn.disabled = false; btn.textContent = "Save changes"; }
       showErr("tkErr", msg);
+      // "Azure DevOps needs Effort filled in…": take the user to that field.
+      const need = /^Azure DevOps needs (.+?) filled in/.exec(msg)?.[1];
+      const n = need && (TK.numbers || []).find((x) => x.label.toLowerCase() === need.toLowerCase());
+      if (n) $("tk").querySelector(`[data-n="${CSS.escape(n.field)}"]`)?.focus();
     }
   }
 
@@ -710,7 +724,9 @@
     try {
       const keep = tkChanges(); // a pending edit survives posting a comment
       renderTicket(await invoke("add_comment", { id: TK.id, text }), "Comment added.");
-      for (const [k, v] of Object.entries(keep)) { const el = tkField(k); if (el) el.value = String(v); }
+      const { numbers = {}, ...fields } = keep;
+      for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el) el.value = String(v); }
+      for (const [k, v] of Object.entries(numbers)) { const el = $("tk").querySelector(`[data-n="${CSS.escape(k)}"]`); if (el) el.value = v ?? ""; }
       tkDirty();
     } catch (e) {
       showErr("tkErr", String(e?.message || e));
@@ -838,8 +854,12 @@
     else if (what === "discard") renderTicket(TK);
     else if (what === "comment") tkComment();
   });
-  $("tk").addEventListener("change", (e) => { if (e.target.matches("[data-f]")) tkDirty(); });
-  $("tk").addEventListener("keydown", (e) => { if (e.target.id === "tkComment" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkComment(); } });
+  $("tk").addEventListener("change", (e) => { if (e.target.matches("[data-f],[data-n]")) tkDirty(); });
+  $("tk").addEventListener("input", (e) => { if (e.target.matches("[data-n]")) tkDirty(); });
+  $("tk").addEventListener("keydown", (e) => {
+    if (e.target.id === "tkComment" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkComment(); }
+    else if (e.target.matches("[data-n]") && e.key === "Enter") { e.preventDefault(); tkSave(); }
+  });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
 
   /* ---------- Cmd/Ctrl + R: refresh from Azure DevOps instead of reloading the page ---------- */
