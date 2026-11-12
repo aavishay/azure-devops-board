@@ -282,6 +282,8 @@ dialog#ticket .dlg.tk{max-height:none;height:100%;box-sizing:border-box;overflow
 .tk-edit{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
 .tk-edit label{display:flex;flex-direction:column;gap:4px;font-size:12.5px;font-weight:500;min-width:150px}
 .tk-edit select{width:auto;min-width:150px}
+.tk-edit label.num{min-width:0}
+.tk-edit input[type=number]{width:110px}
 .tk-save{display:flex;gap:10px;align-items:center}
 .tk-save[hidden]{display:none}
 .tk-note{color:var(--muted);font-size:12.5px}
