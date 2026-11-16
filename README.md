@@ -14,7 +14,7 @@ Each person runs it on their own machine and signs in with **their own Azure Dev
 | Area | Features |
 |---|---|
 | **Board** | Lanes for New, To Do and In Progress, grouped by workstream or by person. Incidents and P1 items are highlighted, tasks link to their parent PBI, and duplicates are merged into one card. |
-| **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, search, and hiding people you don't need to see. |
+| **Overview** | Summary tiles, a load-by-owner chart, filters by type, workstream and person, search by title, ID or tag, and hiding people you don't need to see. |
 | **Changes** | An Added tag for the last 24 hours, plus a Recent changes log kept on this computer. |
 | **Refresh** | Automatic every 10 minutes (configurable). Also when you return to the tab and the data is stale, and on demand with Refresh or Cmd/Ctrl+R. |
 | **Tickets** | Click a card or any `#number` to open the ticket in a side drawer, with the board still usable beside it (click another card to switch; Esc closes): description or repro steps, key fields, parent and children, discussion and recent history. Change its state, assignee, priority or estimate (Effort, Story points or Remaining work, whichever the type has), or add a comment, without opening Azure DevOps. If the process needs a field for a state, such as Effort before Committed, the panel says so and takes you to it. If someone else changed it since you opened it, your save is refused rather than overwriting theirs. Cmd/Ctrl-click opens it in Azure DevOps instead. |

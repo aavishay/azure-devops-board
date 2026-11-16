@@ -82,6 +82,8 @@
     unas: { n: (t) => !t.owner, label: "Unassigned", cls: "warn" },
     fresh: { n: (t) => t.isNew, label: "Added (24 h)" },
   };
+  // Tags matching the search, to match on and to show on the card.
+  const tagHits = (x, q) => (q ? (x.tags || []).filter((g) => g.toLowerCase().includes(q)) : []);
   function match(t) {
     if (f.owner !== null && (t.owner || "—") !== f.owner) return false;
     if (f.preset && !presets[f.preset].n(t)) return false;
@@ -89,7 +91,7 @@
     if (f.types.size && !f.types.has(t.type)) return false;
     if (f.q) {
       const q = f.q.toLowerCase();
-      const hit = (x) => x.title.toLowerCase().includes(q) || String(x.id).includes(q);
+      const hit = (x) => x.title.toLowerCase().includes(q) || String(x.id).includes(q) || tagHits(x, q).length;
       if (!hit(t) && !t.dups.some(hit)) return false;
     }
     return true;
@@ -118,12 +120,14 @@
     const dupLines = t.dups.map((d) =>
       `<div class="dup" title="Linked in Azure DevOps as a duplicate of #${esc(t.id)}">Duplicate <a href="${esc(d.url)}" target="_blank" rel="noopener" data-ticket="${esc(d.id)}">#${esc(d.id)}</a> ${esc(d.title)}${d.rawState !== t.rawState ? ` <span class="ps">(${esc(d.rawState)})</span>` : ""}</div>`).join("");
     const open = TK?.id === t.id && $("ticket").open;
+    const hits = tagHits(t, f.q.toLowerCase());
+    const tags = hits.length ? `<div class="tags">${hits.map((g) => `<span class="tag">${esc(g)}</span>`).join(" ")}</div>` : "";
     return `<article class="card k-${kind}${t.p === 1 ? " p1" : ""}${mine ? " mine" : ""}${open ? " is-open" : ""}" data-ticket="${esc(t.id)}" tabindex="0" aria-label="Open #${esc(t.id)}: ${esc(t.title)}">
       <div class="tab"><a class="id" href="${esc(t.url)}" target="_blank" rel="noopener" data-ticket="${esc(t.id)}" title="Open here; Cmd/Ctrl-click opens Azure DevOps">${esc(t.id)}</a><span class="kind">${esc(t.type)}</span>${flags}<span class="pri${t.p === 1 ? " p1" : ""}" title="Priority ${esc(t.p)}">P${esc(t.p)}</span></div>
       <div class="body">
         <div class="title">${esc(t.title)}</div>
         ${dupLines}${parentLine}
-        <div class="foot">${owner}${creator}${f.group === "ws" ? "" : `<span class="ws">${esc(t.ws)}</span>`}</div>
+        ${tags}<div class="foot">${owner}${creator}${f.group === "ws" ? "" : `<span class="ws">${esc(t.ws)}</span>`}</div>
       </div>
     </article>`;
   }
