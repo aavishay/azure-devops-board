@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::board::{owner_of, text_to_html, write_error, Ado};
+use crate::board::{owner_of, split_tags, text_to_html, write_error, Ado};
 use crate::settings::enc;
 
 /// Rich-text fields shown when they have content, in this order.
@@ -230,7 +230,7 @@ impl Ado<'_> {
             numbers,
             area: s("System.AreaPath").unwrap_or_default(),
             iteration: s("System.IterationPath").unwrap_or_default(),
-            tags: f["System.Tags"].as_str().map(|t| t.split(';').map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect()).unwrap_or_default(),
+            tags: split_tags(f["System.Tags"].as_str()),
             created_by: name("System.CreatedBy"),
             created_at: s("System.CreatedDate"),
             changed_by: name("System.ChangedBy"),
