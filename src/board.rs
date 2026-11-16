@@ -16,6 +16,7 @@ const FIELDS: &[&str] = &[
     "System.AssignedTo",
     "System.CreatedBy",
     "System.Parent",
+    "System.Tags",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +50,9 @@ pub struct Item {
     /// Set when Azure DevOps links this item as a duplicate of another board item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<u64>,
+    /// Azure DevOps tags, which the search also matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +373,7 @@ impl Ado<'_> {
                     owner_changed_at: 0,
                     prev_owner: None,
                     duplicate_of: None,
+                    tags: split_tags(f["System.Tags"].as_str()),
                 }
             })
             .collect();
@@ -502,6 +507,11 @@ fn create_ops(t: &NewTicket, ty: &TicketType, area_path: &str, org_url: &str) ->
 }
 
 /// Explains a refused change: usually a token made with Work Items (Read) only.
+/// Azure DevOps stores tags as one "a; b; c" string.
+pub(crate) fn split_tags(t: Option<&str>) -> Vec<String> {
+    t.map(|t| t.split(';').map(str::trim).filter(|t| !t.is_empty()).map(String::from).collect()).unwrap_or_default()
+}
+
 pub(crate) fn write_error(e: String) -> String {
     if e.starts_with("Unauthorized") {
         "Azure DevOps didn't allow the change. A Personal Access Token needs the Work Items (Read & write) scope; create a new one in Sign in.".into()
@@ -593,7 +603,14 @@ mod tests {
             owner_changed_at: 0,
             prev_owner: None,
             duplicate_of: None,
+            tags: vec![],
         }
+    }
+
+    #[test]
+    fn tags_split() {
+        assert_eq!(split_tags(Some("observability-q4-2026; Security ;; ")), ["observability-q4-2026", "Security"]);
+        assert!(split_tags(None).is_empty());
     }
 
     #[test]
