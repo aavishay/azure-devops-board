@@ -185,6 +185,10 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
             Some(id) => to_json(app::add_comment(s, id, str_arg(&args, "text").unwrap_or_default()).await),
             None => Err("Which ticket? The id is missing.".into()),
         },
+        "edit_comment" => match (id_arg(&args), args.get("commentId").and_then(Value::as_u64)) {
+            (Some(id), Some(c)) => to_json(app::edit_comment(s, id, c, str_arg(&args, "text").unwrap_or_default()).await),
+            _ => Err("Which comment? The ticket or comment id is missing.".into()),
+        },
         _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Unknown command: {cmd}") }))).into_response(),
     };
     match r {
@@ -318,6 +322,10 @@ mod tests {
         assert!(no_id.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("id is missing"));
         let blank = call("add_comment", json!({ "id": 12, "text": "  " })).await.unwrap();
         assert!(blank.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("comment"));
+        let no_cid = call("edit_comment", json!({ "id": 12, "text": "x" })).await.unwrap();
+        assert_eq!(no_cid.status(), 400);
+        let empty = call("edit_comment", json!({ "id": 12, "commentId": 3, "text": " " })).await.unwrap();
+        assert!(empty.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("can't be empty"));
         assert_eq!(call("no_such_thing", json!({})).await.unwrap().status(), 404);
     }
 }
