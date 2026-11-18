@@ -10,7 +10,7 @@ use crate::auth::{self, AccessToken, KEY_PAT, KEY_REFRESH};
 use crate::board::{Ado, Change, Created, NewTicket, Snapshot, Store, TicketType};
 use crate::secrets::Secrets;
 use crate::settings::{AuthMode, Settings};
-use crate::ticket::{PersonHit, Ticket, TicketEdit};
+use crate::ticket::{Iteration, PersonHit, Ticket, TicketEdit};
 
 pub struct AppState {
     http: reqwest::Client,
@@ -370,6 +370,12 @@ pub async fn search_people(state: &AppState, query: String) -> Result<Vec<Person
     }
     let (s, auth) = state.signed_in().await?;
     Ado { http: &state.http, settings: &s, auth }.search_people(q).await
+}
+
+/// The project's iterations, to move a ticket to another sprint.
+pub async fn iterations(state: &AppState) -> Result<Vec<Iteration>, String> {
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.iterations().await
 }
 
 /* ---------------------------------------------------------------- state */
