@@ -1,5 +1,5 @@
 //! One ticket in full, for the ticket panel: fields, rich text, links, discussion and
-//! history, plus the quick edits (state, assignee, priority, estimates) and new comments.
+//! history, plus the quick edits (state, assignee, priority, estimates, iteration) and comments.
 
 use std::collections::BTreeMap;
 
@@ -107,6 +107,17 @@ pub struct PersonHit {
     pub unique: String,
 }
 
+/// An iteration (sprint) a ticket can be moved to, with its dates when it has them.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Iteration {
+    /// As in System.IterationPath: `Fabrikam\Sprint 42`.
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StateInfo {
     pub name: String,
@@ -166,6 +177,9 @@ pub struct TicketEdit {
     /// Estimate fields by reference name; `None` clears one.
     #[serde(default)]
     pub numbers: BTreeMap<String, Option<f64>>,
+    /// A new iteration path, such as `Fabrikam\Sprint 42`.
+    #[serde(default)]
+    pub iteration: Option<String>,
 }
 
 pub const STALE: &str = "Someone changed this ticket since you opened it, so nothing was saved. It now shows the latest; make your change again.";
@@ -346,6 +360,31 @@ impl Ado<'_> {
     }
 }
 
+impl Ado<'_> {
+    /// Every iteration in the project, the project itself (the root) first.
+    pub async fn iterations(&self) -> Result<Vec<Iteration>, String> {
+        let v = self.call(reqwest::Method::GET, format!("{}/wit/classificationnodes/Iterations?$depth=20&api-version=7.1", self.settings.project_api()), None).await?;
+        Ok(iterations(&v))
+    }
+}
+
+/// Flattens the iteration tree. Node names joined with `\` give the iteration path,
+/// since the root node is named after the project.
+fn iterations(root: &Value) -> Vec<Iteration> {
+    fn walk(n: &Value, parent: Option<&str>, out: &mut Vec<Iteration>) {
+        let Some(name) = n["name"].as_str().filter(|s| !s.is_empty()) else { return };
+        let path = parent.map_or_else(|| name.to_string(), |p| format!("{p}\\{name}"));
+        let day = |k: &str| n["attributes"][k].as_str().map(|d| d.get(..10).unwrap_or(d).to_string());
+        out.push(Iteration { path: path.clone(), start: day("startDate"), finish: day("finishDate") });
+        for c in n["children"].as_array().into_iter().flatten() {
+            walk(c, Some(&path), out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, None, &mut out);
+    out
+}
+
 fn people_hits(v: &Value) -> Vec<PersonHit> {
     let mut out: Vec<PersonHit> = Vec::new();
     for i in v["results"].as_array().into_iter().flatten().flat_map(|r| r["identities"].as_array().into_iter().flatten()) {
@@ -479,6 +518,9 @@ fn edit_ops(e: &TicketEdit) -> Result<Vec<Value>, String> {
     if let Some(p) = e.priority {
         ops.push(json!({ "op": "add", "path": format!("/fields/{PRIORITY}"), "value": p }));
     }
+    if let Some(it) = e.iteration.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        ops.push(json!({ "op": "add", "path": "/fields/System.IterationPath", "value": it }));
+    }
     for (field, value) in &e.numbers {
         let Some((_, label)) = NUMBERS.iter().find(|(k, _)| k == field) else {
             return Err(format!("The board can't change the field {field}."));
@@ -537,7 +579,7 @@ mod tests {
 
     #[test]
     fn edit_patch() {
-        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new() };
+        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new(), iteration: None };
         let ops = edit_ops(&e).unwrap();
         assert_eq!(ops[0], json!({ "op": "test", "path": "/rev", "value": 7 }));
         assert_eq!(ops[1], json!({ "op": "add", "path": "/fields/System.State", "value": "Done" }));
@@ -553,6 +595,25 @@ mod tests {
         assert_eq!(edit_ops(&num("Microsoft.VSTS.Scheduling.Effort", None)).unwrap()[1], json!({ "op": "remove", "path": "/fields/Microsoft.VSTS.Scheduling.Effort" }));
         assert!(edit_ops(&num("Microsoft.VSTS.Scheduling.Effort", Some(-1.0))).unwrap_err().contains("Effort"));
         assert!(edit_ops(&num("System.Title", Some(1.0))).is_err(), "only the estimate fields");
+        let it = TicketEdit { iteration: Some("Fabrikam\\Sprint 42".into()), ..none.clone() };
+        assert_eq!(edit_ops(&it).unwrap()[1], json!({ "op": "add", "path": "/fields/System.IterationPath", "value": "Fabrikam\\Sprint 42" }));
+        assert_eq!(edit_ops(&TicketEdit { iteration: Some(" ".into()), ..none.clone() }).unwrap().len(), 1, "a blank iteration isn't sent");
+    }
+
+    #[test]
+    fn iteration_tree() {
+        let v = json!({ "name": "Fabrikam", "children": [
+            { "name": "2026", "children": [
+                { "name": "Sprint 41", "attributes": { "startDate": "2026-11-02T00:00:00Z", "finishDate": "2026-11-13T00:00:00Z" } },
+                { "name": "Sprint 42", "attributes": { "startDate": "2026-11-16T00:00:00Z", "finishDate": "2026-11-27T00:00:00Z" } },
+            ] },
+            { "name": "Backlog" },
+        ] });
+        let it = iterations(&v);
+        assert_eq!(it.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(), ["Fabrikam", "Fabrikam\\2026", "Fabrikam\\2026\\Sprint 41", "Fabrikam\\2026\\Sprint 42", "Fabrikam\\Backlog"]);
+        assert_eq!((it[3].start.as_deref(), it[3].finish.as_deref()), (Some("2026-11-16"), Some("2026-11-27")));
+        assert_eq!(it[4].start, None);
+        assert!(iterations(&json!({})).is_empty());
     }
 
     #[test]
@@ -593,6 +654,7 @@ mod tests {
                     { "id": 2, "createdBy": { "displayName": "Alex Doe", "id": "me-1" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" },
                     { "id": 1, "createdBy": { "displayName": "Sam Roe", "id": "other-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "<div>Found it</div>" },
                 ] }),
+                ("GET", p) if p.ends_with("/wit/classificationnodes/Iterations") => json!({ "name": "Fabrikam", "children": [{ "name": "Sprint 42" }] }),
                 ("GET", p) if p.ends_with("/_apis/connectionData") => json!({ "authenticatedUser": { "id": "me-1", "providerDisplayName": "Alex Doe" } }),
                 ("PATCH", p) if p.ends_with("/comments/2") => {
                     let b: Value = serde_json::from_slice(&body).unwrap();
@@ -659,8 +721,9 @@ mod tests {
         let hits = ado.search_people("sam").await.unwrap();
         assert_eq!(hits, [PersonHit { name: "Sam Roe".into(), unique: "sam.roe@example.com".into() }]);
         assert!(t.missing.is_empty(), "{:?}", t.missing);
+        assert_eq!(ado.iterations().await.unwrap().iter().map(|i| i.path.as_str()).collect::<Vec<_>>(), ["Fabrikam", "Fabrikam\\Sprint 42"]);
 
-        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new() };
+        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new(), iteration: None };
         ado.edit(&edit(4, "Done")).await.unwrap();
         assert_eq!(ado.edit(&edit(3, "Done")).await.unwrap_err(), STALE);
         let rule = ado.edit(&edit(4, "Bogus")).await.unwrap_err();

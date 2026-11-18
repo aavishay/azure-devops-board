@@ -318,13 +318,16 @@ dialog#ticket .dlg.tk{max-height:none;height:100%;box-sizing:border-box;overflow
 .tk-history li{display:flex;gap:10px;flex-wrap:wrap}
 .tk-history .who{font-weight:500}
 
-/* person picker */
+/* pickers: people and iterations */
 .pick{position:relative}
 .pick-in{min-width:200px}
 .tk-edit label.who{min-width:220px}
+.tk-edit label.iter{flex:1 1 260px;min-width:220px}
+.tk-edit label.iter .pick-in{width:100%}
 .pick-list{position:absolute;z-index:30;top:calc(100% + 2px);left:0;right:0;min-width:260px;max-height:260px;overflow:auto;margin:0;padding:4px;list-style:none;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.35);font-weight:400}
 .pick-list li{padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pick-list li .muted{font-size:12px}
 .pick-list li.on,.pick-list li[data-i]:hover{background:var(--accent);color:#fff}
 .pick-list li.on .muted,.pick-list li[data-i]:hover .muted{color:inherit;opacity:.8}
 .pick-list li.pick-none{cursor:default;color:var(--muted)}
+.pick-list li[data-cur]{font-weight:600}
