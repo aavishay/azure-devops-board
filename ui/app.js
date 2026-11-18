@@ -14,6 +14,9 @@
   let T = [];             // cards minus hidden people's
   let PARENTS = {};
   const f = { q: "", owner: store.get("owner", "") || null, preset: null, ws: WS.ORDER.includes(store.get("ws", "")) ? store.get("ws", "") : null, types: new Set((() => { try { const v = JSON.parse(store.get("types", "[]")); return Array.isArray(v) ? v : []; } catch { return []; } })()), group: store.get("group", "ws") === "owner" ? "owner" : "ws" };
+  // Filters in the order they were turned on, so Escape can take off the latest one.
+  const fOrder = [...[...f.types].map((ty) => `type:${ty}`), ...(f.ws ? ["ws"] : []), ...(f.owner !== null ? ["owner"] : [])];
+  const fOn = (k, on) => { const i = fOrder.indexOf(k); if (i >= 0) fOrder.splice(i, 1); if (on) fOrder.push(k); };
   let me = store.get("me", "");
   // People whose tickets are left off the board ("—" is Unassigned), remembered across restarts.
   const hidden = new Set((() => { try { const v = JSON.parse(store.get("hidden", "[]")); return Array.isArray(v) ? v : []; } catch { return []; } })());
@@ -94,6 +97,21 @@
       const hit = (x) => x.title.toLowerCase().includes(q) || String(x.id).includes(q) || tagHits(x, q).length;
       if (!hit(t) && !t.dups.some(hit)) return false;
     }
+    return true;
+  }
+  const fActive = (k) => (k === "q" ? !!f.q : k === "owner" ? f.owner !== null : k === "preset" ? !!f.preset : k === "ws" ? !!f.ws : f.types.has(k.slice(5)));
+  /** Takes off the filter turned on last; false when none is on. */
+  function clearLastFilter() {
+    while (fOrder.length && !fActive(fOrder[fOrder.length - 1])) fOrder.pop();
+    const k = fOrder.pop();
+    if (!k) return false;
+    if (k === "q") { f.q = ""; $("q").value = ""; }
+    else if (k === "owner") f.owner = null;
+    else if (k === "preset") f.preset = null;
+    else if (k === "ws") f.ws = null;
+    else f.types.delete(k.slice(5));
+    saveFilters();
+    render();
     return true;
   }
   const saveFilters = () => { store.set("types", JSON.stringify([...f.types])); store.set("ws", f.ws || ""); store.set("owner", f.owner || ""); };
@@ -470,34 +488,48 @@
       ...[...people].sort(([a], [b]) => a.localeCompare(b)).map(([n, v]) => [v, n])];
   }
 
-  /* ---------- person picker: type to find someone on the board or in the organization ---------- */
-  // Markup: a text box the user types in, a hidden input holding the chosen sign-in name
-  // ("" is Unassigned), and the suggestion list. initPicker() wires it up.
+  /* ---------- pickers: type to find a person, or an iteration ---------- */
+  // Markup: a text box the user types in, a hidden input holding the chosen value
+  // ("" is Unassigned for people), and the suggestion list. initPicker() wires it up
+  // with a source of choices: {list(), remote?(q), cache?, free?(text), empty?, ready?}.
   let pickN = 0;
-  const pickerHtml = (hidden, value, label) => {
+  const pickerHtml = (hidden, value, label, placeholder = "Unassigned · type a name or email") => {
     const id = `pick${++pickN}`;
-    return `<div class="pick"><input type="text" class="pick-in" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}" autocomplete="off" spellcheck="false" placeholder="Unassigned · type a name or email" value="${esc(label)}">`
+    return `<div class="pick"><input type="text" class="pick-in" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}" autocomplete="off" spellcheck="false" placeholder="${esc(placeholder)}" value="${esc(label)}">`
       + `<input type="hidden" ${hidden} value="${esc(value)}" data-was="${esc(value)}"><ul class="pick-list" id="${id}" role="listbox" hidden></ul></div>`;
   };
+  const norm = (x) => String(x || "").toLowerCase();
   const SEARCHED = new Map(); // query -> people found in the organization
   const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
-  function initPicker(root, extra) {
+  // People: everyone on the board, then whoever the organization search finds; an email is taken as typed.
+  const peopleSource = (extra) => ({
+    list: () => peopleOptions(extra).map(([value, label]) => ({ value, label, note: value && norm(value) !== norm(label) && !label.startsWith("Me (") ? value : "" })),
+    cache: SEARCHED,
+    remote: async (q) => (await invoke("search_people", { query: q })).map((p) => ({ value: p.unique, label: p.name, note: p.unique })),
+    free: (t) => EMAIL.test(t),
+    empty: true,
+    none: "No one found",
+  });
+  function initPicker(root, src) {
     const input = root.querySelector(".pick-in"), hidden = root.querySelector("input[type=hidden]"), list = root.querySelector(".pick-list");
-    const local = () => peopleOptions(extra).map(([value, label]) => ({ value, label }));
     let shown = [], active = -1, timer = 0, label = input.value;
-    const norm = (x) => String(x || "").toLowerCase();
+    // Every word typed has to appear somewhere in the name, value or note.
     const candidates = (q) => {
-      const all = local();
-      for (const p of SEARCHED.get(norm(q)) || []) if (!all.some((x) => norm(x.value) === norm(p.unique))) all.push({ value: p.unique, label: p.name });
-      if (!q) return all;
-      return all.filter((x) => x.value && (norm(x.label).includes(norm(q)) || norm(x.value).includes(norm(q))));
+      const all = src.list();
+      for (const p of src.cache?.get(norm(q)) || []) if (!all.some((x) => norm(x.value) === norm(p.value))) all.push(p);
+      const words = norm(q).split(/\s+/).filter(Boolean);
+      if (!words.length) return all;
+      return all.filter((x) => { const hay = norm(`${x.label} ${x.value} ${x.note || ""}`); return x.value && words.every((w) => hay.includes(w)); });
     };
     const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
     const paint = () => {
       const q = input.value.trim() === label ? "" : input.value.trim();
-      shown = candidates(q).slice(0, 50);
-      if (!shown.length) { list.innerHTML = `<li class="pick-none">${q.length < 2 ? "No match" : SEARCHED.has(norm(q)) ? "No one found" : "Searching…"}</li>`; }
-      else list.innerHTML = shown.map((x, i) => `<li role="option" id="${list.id}-${i}" data-i="${i}"${i === active ? ` class="on" aria-selected="true"` : ""}>${esc(x.label)}${x.value && norm(x.value) !== norm(x.label) && !x.label.startsWith("Me (") ? ` <span class="muted">${esc(x.value)}</span>` : ""}</li>`).join("");
+      shown = candidates(q).slice(0, 60);
+      if (!shown.length) {
+        const msg = src.failed ? src.failed : src.loading ? "Loading…" : !src.remote || q.length < 2 ? "No match" : src.cache.has(norm(q)) ? src.none : "Searching…";
+        list.innerHTML = `<li class="pick-none">${esc(msg)}</li>`;
+      }
+      else list.innerHTML = shown.map((x, i) => `<li role="option" id="${list.id}-${i}" data-i="${i}"${i === active ? ` class="on" aria-selected="true"` : ""}${x.value === hidden.value ? ` data-cur` : ""}>${esc(x.label)}${x.note ? ` <span class="muted">${esc(x.note)}</span>` : ""}</li>`).join("");
       list.hidden = false; input.setAttribute("aria-expanded", "true");
       if (active >= 0) { input.setAttribute("aria-activedescendant", `${list.id}-${active}`); list.querySelector(".on")?.scrollIntoView({ block: "nearest" }); }
     };
@@ -511,22 +543,25 @@
     const settle = () => {
       const t = input.value.trim();
       if (t === label) return;
-      if (!t) return choose({ value: "", label: "" });
+      if (!t) { if (src.empty) choose({ value: "", label: "" }); else input.value = label; return; }
       const found = candidates(t).filter((x) => x.value);
       const hit = found.find((x) => norm(x.label) === norm(t) || norm(x.value) === norm(t)) || (found.length === 1 ? found[0] : null);
       if (hit) return choose(hit);
-      if (EMAIL.test(t)) return choose({ value: t, label: t });
+      if (src.free?.(t)) return choose({ value: t, label: t });
       input.value = label; // nothing matches: keep what was there
     };
     const search = (q) => {
       clearTimeout(timer);
-      if (q.length < 2 || SEARCHED.has(norm(q))) return;
+      if (!src.remote || q.length < 2 || src.cache.has(norm(q))) return;
       timer = setTimeout(async () => {
-        try { SEARCHED.set(norm(q), await invoke("search_people", { query: q })); } catch { SEARCHED.set(norm(q), []); }
+        try { src.cache.set(norm(q), await src.remote(q)); } catch { src.cache.set(norm(q), []); }
         if (document.activeElement === input && input.value.trim() === q) paint();
       }, 250);
     };
-    input.addEventListener("focus", () => { input.select(); active = -1; paint(); });
+    input.addEventListener("focus", () => {
+      input.select(); active = -1; paint();
+      src.ready?.then(() => { if (document.activeElement === input) paint(); });
+    });
     input.addEventListener("input", () => { active = -1; paint(); search(input.value.trim()); });
     input.addEventListener("blur", () => { settle(); close(); });
     input.addEventListener("keydown", (e) => {
@@ -535,7 +570,7 @@
         if (list.hidden) paint();
         if (shown.length) { active = (active + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length; paint(); }
       } else if (e.key === "Enter") {
-        // Enter picks the highlighted person; otherwise it settles what was typed (and a form may submit).
+        // Enter picks the highlighted choice; otherwise it settles what was typed (and a form may submit).
         if (!list.hidden && active >= 0 && shown[active]) { e.preventDefault(); choose(shown[active]); }
         else { if (!list.hidden) e.preventDefault(); settle(); close(); }
       } else if (e.key === "Escape" && !list.hidden) {
@@ -548,6 +583,38 @@
       const x = candidates("").find((c) => norm(c.value) === norm(value)) || { value, label: value };
       label = x.value ? x.label : ""; input.value = label; hidden.value = value;
     };
+  }
+
+  // Iterations: loaded once, listed current sprint first, then the coming ones, then the
+  // rest (undated ones in tree order, past sprints latest first).
+  let ITERS = null, iterLoad = null;
+  const iterSource = (cur) => {
+    const src = {
+      list: () => {
+        const all = (ITERS || []).map((i) => ({ value: i.path, label: i.path, note: iterNote(i) }));
+        if (cur && !all.some((x) => x.value === cur)) all.unshift({ value: cur, label: cur, note: "" });
+        return all;
+      },
+      loading: !ITERS,
+    };
+    if (!ITERS) {
+      src.ready = (iterLoad ||= invoke("iterations").then((v) => { ITERS = sortIters(v); }).finally(() => { iterLoad = null; }))
+        .then(() => { src.loading = false; }, (e) => { src.loading = false; src.failed = `Couldn't load the iterations: ${e?.message || e}`; });
+    }
+    return src;
+  };
+  const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  const day = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  function iterNote(i) {
+    if (!i.start || !i.finish) return "";
+    const now = today();
+    return `${day(i.start)} – ${day(i.finish)}${i.start <= now && now <= i.finish ? " · current" : ""}`;
+  }
+  function sortIters(v) {
+    const now = today();
+    const when = (i) => (!i.start || !i.finish ? 2 : i.finish < now ? 3 : i.start <= now ? 0 : 1);
+    return v.map((i, n) => ({ ...i, n })).sort((a, b) => when(a) - when(b)
+      || (when(a) === 1 ? a.start.localeCompare(b.start) : when(a) === 3 ? b.start.localeCompare(a.start) : a.n - b.n));
   }
 
   function fillTypes() {
@@ -576,7 +643,7 @@
     const lastWho = store.get("newAssignee", "");
     const was = opts.find(([v]) => v && v === lastWho);
     $("newWho").innerHTML = pickerHtml(`name="assignedTo"`, was ? was[0] : "", was ? was[1] : "");
-    initPicker($("newWho").querySelector(".pick"));
+    initPicker($("newWho").querySelector(".pick"), peopleSource());
 
     $("parentList").innerHTML = ALL.filter((t) => t.type !== "Task").sort((a, b) => b.id - a.id)
       .map((t) => `<option value="${esc(t.id)}">${esc(t.type)} · ${esc(t.title)}</option>`).join("");
@@ -750,7 +817,19 @@
   }
 
   let TK = null;           // the ticket on show
-  const tkBack = [];        // ids to go back to, from opening linked tickets
+  const tkHist = [];        // tickets viewed since the panel opened, for Back/Forward (Cmd/Ctrl + ←/→)
+  let tkAt = -1;            // where in tkHist the panel is
+  const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
+  const tkNav = () => {
+    const b = tkHist[tkAt - 1], n = tkHist[tkAt + 1];
+    return (b != null ? `<button class="btn" type="button" data-tk="back" title="Back to #${esc(b)} (${MOD}←)">← #${esc(b)}</button>` : "")
+      + (n != null ? `<button class="btn" type="button" data-tk="fwd" title="Forward to #${esc(n)} (${MOD}→)">#${esc(n)} →</button>` : "");
+  };
+  /** Back (-1) or forward (1) through the tickets viewed in the panel. */
+  function tkGo(step) {
+    const id = tkHist[tkAt + step];
+    if (id != null && $("ticket").open) openTicket(id, { step });
+  }
   const tkKind = (type) => ({ Incident: "incident", "Product Backlog Item": "pbi", PBI: "pbi", Task: "task", Bug: "bug" }[type] || "other");
   const tkLink = (l) => `<li><button class="linkbtn" type="button" data-ticket="${esc(l.id)}">#${esc(l.id)}</button> <span class="tk-kind">${esc(l.type)}</span> ${esc(l.title)}${l.state ? ` <span class="ps">(${esc(l.state)})</span>` : ""}</li>`;
 
@@ -766,15 +845,17 @@
   }
   function closeTicket() { if ($("ticket").open && tkLeave()) $("ticket").close(); }
 
-  async function openTicket(id, { push = false, back = false } = {}) {
+  // Opening a ticket from the board or a link adds it after the current one, dropping any
+  // you had gone back from, as a browser does; `step` moves through that list instead.
+  async function openTicket(id, { step = 0 } = {}) {
     const dlg = $("ticket");
     if (dlg.open && TK?.id === id) return;
     if (dlg.open && !tkLeave()) return;
-    if (back) tkBack.pop();
-    else if (push && TK && TK.id !== id) tkBack.push(TK.id);
-    else if (!push) tkBack.length = 0;
+    if (step) tkAt += step;
+    else if (!dlg.open) { tkHist.splice(0, tkHist.length, id); tkAt = 0; }
+    else { tkHist.splice(tkAt + 1, Infinity, id); tkAt = tkHist.length - 1; }
     TK = { id, loading: true };
-    $("tk").innerHTML = `<div class="tk-top"><span class="tk-id">#${esc(id)}</span><span style="flex:1"></span><button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button></div><p class="muted">Loading #${esc(id)} from Azure DevOps…</p>`;
+    $("tk").innerHTML = `<div class="tk-top">${tkNav()}<span class="tk-id">#${esc(id)}</span><span style="flex:1"></span><button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button></div><p class="muted">Loading #${esc(id)} from Azure DevOps…</p>`;
     $("tk").scrollTop = 0;
     if (!dlg.open) {
       tkOpener = document.activeElement;
@@ -799,7 +880,7 @@
     const prio = [1, 2, 3, 4].map((p) => `<option value="${p}"${p === t.priority ? " selected" : ""}>${p}</option>`).join("");
     const when = (at) => (at ? esc(fmt(at)) : "");
     const meta = [
-      ["Area", esc(t.area)], ["Iteration", esc(t.iteration)],
+      ["Area", esc(t.area)],
       ...(t.tags.length ? [["Tags", t.tags.map((g) => `<span class="tag">${esc(g)}</span>`).join(" ")]] : []),
       ["Created", `${esc(t.createdBy || "")}${t.createdAt ? " · " + when(t.createdAt) : ""}`],
       ["Changed", `${esc(t.changedBy || "")}${t.changedAt ? " · " + when(t.changedAt) : ""}`],
@@ -808,7 +889,7 @@
       : h.changes.map((c) => `${esc(c.field)}: ${esc(c.from ?? "—")} → ${esc(c.to ?? "—")}`).join("; ")}</span></li>`).join("");
     $("tk").innerHTML = `
       <div class="tk-top">
-        ${tkBack.length ? `<button class="btn" type="button" data-tk="back" title="Back to #${esc(tkBack[tkBack.length - 1])}">← #${esc(tkBack[tkBack.length - 1])}</button>` : ""}
+        ${tkNav()}
         <span class="tk-kind k-${tkKind(t.type)}">${esc(t.type)}</span><span class="tk-id">#${esc(t.id)}</span>
         <span style="flex:1"></span>
         <a class="btn" href="${esc(t.url)}" target="_blank" rel="noopener">Open in Azure DevOps ↗</a>
@@ -818,6 +899,7 @@
       <div class="tk-edit">
         <label>State<select data-f="state">${states}</select></label>
         <label class="who">Assigned to${pickerHtml(`data-f="assignedTo"`, curWho, t.assignedTo?.name || "")}</label>
+        <label class="iter">Iteration${pickerHtml(`data-f="iteration"`, t.iteration, t.iteration, "Type a sprint name")}</label>
         ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
         ${t.numbers.map((n) => `<label class="num">${esc(n.label)}<input type="number" min="0" step="any" inputmode="decimal" data-n="${esc(n.field)}" value="${n.value ?? ""}" placeholder="—"></label>`).join("")}
         <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
@@ -849,7 +931,8 @@
       const d = document.createElement("div"); d.className = "rich"; d.append(richText(c.html, c.markdown));
       li.append(d); cl.append(li);
     }
-    initPicker($("tk").querySelector(".pick"), t.assignedTo);
+    initPicker($("tk").querySelector(".who .pick"), peopleSource(t.assignedTo));
+    initPicker($("tk").querySelector(".iter .pick"), iterSource(t.iteration));
     $("ticket").setAttribute("aria-labelledby", "tkTitle");
   }
 
@@ -861,6 +944,8 @@
     if (st && st !== TK.state) out.state = st;
     const who = tkField("assignedTo");
     if (who && who.value !== who.dataset.was) out.assignedTo = who.value; // hidden inputs have no separate default
+    const it = tkField("iteration");
+    if (it && it.value && it.value !== it.dataset.was) out.iteration = it.value;
     const p = tkField("priority");
     if (p && p.value && Number(p.value) !== TK.priority) out.priority = Number(p.value);
     // Estimates: a changed number is sent, a cleared one is sent as null (removed).
@@ -1016,26 +1101,27 @@
 
   /* ---------- events ---------- */
   document.addEventListener("click", (e) => {
-    const s = e.target.closest("[data-preset]"); if (s) { const k = s.dataset.preset; f.preset = f.preset === k ? null : k; render(); return; }
+    const s = e.target.closest("[data-preset]"); if (s) { const k = s.dataset.preset; f.preset = f.preset === k ? null : k; fOn("preset", !!f.preset); render(); return; }
     const gb = e.target.closest("[data-group]"); if (gb) { f.group = gb.dataset.group; store.set("group", f.group); render(); return; }
     const hb = e.target.closest("[data-hide]"); if (hb) { setHidden(hb.dataset.hide, true); return; }
     const ub = e.target.closest("[data-unhide]"); if (ub) { setHidden(ub.dataset.unhide || null, false); return; }
-    const o = e.target.closest("[data-owner]"); if (o) { const k = o.dataset.owner; f.owner = f.owner === k ? null : k; saveFilters(); render(); return; }
+    const o = e.target.closest("[data-owner]"); if (o) { const k = o.dataset.owner; f.owner = f.owner === k ? null : k; fOn("owner", f.owner !== null); saveFilters(); render(); return; }
     const c = e.target.closest("[data-chip]");
     if (c) {
       const k = c.dataset.chip;
       if (k.startsWith("type:")) {
         const ty = k.slice(5);
         if (!ty) f.types.clear(); else if (!f.types.delete(ty)) f.types.add(ty);
+        if (ty) fOn(k, f.types.has(ty));
         saveFilters();
       }
-      else if (k.startsWith("ws:")) { const w = k.slice(3); f.ws = f.ws === w ? null : w; saveFilters(); }
-      else f.preset = f.preset === k ? null : k;
+      else if (k.startsWith("ws:")) { const w = k.slice(3); f.ws = f.ws === w ? null : w; fOn("ws", !!f.ws); saveFilters(); }
+      else { f.preset = f.preset === k ? null : k; fOn("preset", !!f.preset); }
       render();
     }
   });
-  $("q").addEventListener("input", (e) => { f.q = e.target.value.trim(); render(); });
-  $("clear").addEventListener("click", () => { Object.assign(f, { q: "", owner: null, preset: null, ws: null }); f.types.clear(); saveFilters(); $("q").value = ""; render(); });
+  $("q").addEventListener("input", (e) => { f.q = e.target.value.trim(); fOn("q", !!f.q); render(); });
+  $("clear").addEventListener("click", () => { Object.assign(f, { q: "", owner: null, preset: null, ws: null }); f.types.clear(); fOrder.length = 0; saveFilters(); $("q").value = ""; render(); });
   $("refresh").addEventListener("click", () => refresh("manual"));
   $("me").addEventListener("change", (e) => { me = e.target.value; store.set("me", me); if (!me && f.preset === "mine") f.preset = null; render(); });
   setInterval(renderStatus, 60e3); // keep "stale" indicator honest
@@ -1074,18 +1160,21 @@
     if (a && a !== el && !a.dataset.ticket) return; // some other link inside a card
     if (!a && String(getSelection()).trim()) return;
     e.preventDefault();
-    // Links inside the drawer keep a way back; a card on the board starts afresh.
-    openTicket(Number(el.dataset.ticket), { push: !!e.target.closest("#tk") });
+    openTicket(Number(el.dataset.ticket));
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.matches?.("article.card[data-ticket]")) { e.preventDefault(); openTicket(Number(e.target.dataset.ticket)); }
+    if (e.key !== "Escape" || document.querySelector("dialog:modal")) return;
     // The drawer isn't modal, so Escape doesn't close it by itself.
-    if (e.key === "Escape" && $("ticket").open && !document.querySelector("dialog:modal")) { e.preventDefault(); closeTicket(); }
+    if ($("ticket").open) { e.preventDefault(); closeTicket(); }
+    // In the search box Escape empties it; elsewhere on the board it takes off the latest filter.
+    else if (e.target.id === "q" && f.q) { e.preventDefault(); e.target.value = ""; f.q = ""; fOn("q", false); render(); }
+    else if (e.target.id === "q" || !e.target.closest?.("input,textarea,select,[contenteditable]")) { if (clearLastFilter()) e.preventDefault(); }
   });
   $("ticket").addEventListener("close", () => {
     document.body.classList.remove("drawer-open");
     markOpen(null);
-    tkBack.length = 0;
+    tkHist.length = 0; tkAt = -1;
     if (tkOpener?.isConnected) tkOpener.focus();
     tkOpener = null;
   });
@@ -1093,7 +1182,8 @@
     const b = e.target.closest("[data-tk]"); if (!b) return;
     const what = b.dataset.tk;
     if (what === "close") closeTicket();
-    else if (what === "back" && tkBack.length) openTicket(tkBack[tkBack.length - 1], { back: true });
+    else if (what === "back") tkGo(-1);
+    else if (what === "fwd") tkGo(1);
     else if (what === "save") tkSave();
     else if (what === "discard") renderTicket(TK);
     else if (what === "comment") tkComment();
@@ -1110,6 +1200,15 @@
     else if (e.target.matches("[data-n]") && e.key === "Enter") { e.preventDefault(); tkSave(); }
   });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
+
+  /* ---------- Cmd/Ctrl + ←/→: back and forward through the tickets viewed in the panel ---------- */
+  document.addEventListener("keydown", (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+    if (!$("ticket").open || document.querySelector("dialog:modal")) return;
+    if (e.target.closest?.("input,textarea,select,[contenteditable]")) return; // there it moves the cursor
+    e.preventDefault();
+    tkGo(e.key === "ArrowLeft" ? -1 : 1);
+  });
 
   /* ---------- Cmd/Ctrl + R: refresh from Azure DevOps instead of reloading the page ---------- */
   document.addEventListener("keydown", (e) => {
