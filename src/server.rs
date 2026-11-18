@@ -190,6 +190,7 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
             _ => Err("Which comment? The ticket or comment id is missing.".into()),
         },
         "search_people" => to_json(app::search_people(s, str_arg(&args, "query").unwrap_or_default()).await),
+        "iterations" => to_json(app::iterations(s).await),
         _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Unknown command: {cmd}") }))).into_response(),
     };
     match r {
