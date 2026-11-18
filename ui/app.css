@@ -310,5 +310,10 @@ dialog#ticket .dlg.tk{max-height:none;height:100%;box-sizing:border-box;overflow
 .tk-comments li{border:1px solid var(--line);border-radius:var(--r);padding:8px 10px}
 .tk-c-head{display:flex;gap:10px;align-items:baseline;margin-bottom:4px;font-size:12.5px}
 .tk-c-head time,.tk-history time{color:var(--muted);font-size:12px;white-space:nowrap}
+.tk-c-head .muted{font-size:12px}
+.tk-c-editbtn{margin-left:auto;font-size:12px}
+.tk-c-edit{display:flex;flex-direction:column;gap:6px}
+.tk-c-edit textarea{min-height:70px}
+.tk-c-actions{display:flex;gap:10px;align-items:center}
 .tk-history li{display:flex;gap:10px;flex-wrap:wrap}
 .tk-history .who{font-weight:500}
