@@ -94,7 +94,17 @@ pub struct NumberField {
 #[derive(Debug, Clone, Serialize)]
 pub struct Section {
     pub label: String,
+    /// HTML, or Markdown source when `markdown` is set.
     pub html: String,
+    pub markdown: bool,
+}
+
+/// Someone to assign a ticket to, from the people search.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PersonHit {
+    pub name: String,
+    /// Sign-in name (email), which assigns unambiguously.
+    pub unique: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,6 +131,8 @@ pub struct Comment {
     /// Written by the signed-in user, who can edit it.
     pub mine: bool,
     pub edited: bool,
+    /// The text is Markdown source rather than HTML.
+    pub markdown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -245,7 +257,10 @@ impl Ado<'_> {
             url: self.settings.edit_url(id),
             sections: SECTIONS
                 .iter()
-                .filter_map(|(k, label)| f[*k].as_str().filter(|h| !h.trim().is_empty()).map(|h| Section { label: label.to_string(), html: h.to_string() }))
+                .filter_map(|(k, label)| {
+                    let h = f[*k].as_str().filter(|h| !h.trim().is_empty())?;
+                    Some(Section { label: label.to_string(), html: h.to_string(), markdown: is_markdown(&w["multilineFieldsFormat"][*k]) })
+                })
                 .collect(),
             states: if states.is_empty() { vec![StateInfo { name: state.clone(), category: String::new() }] } else { states },
             parent: parent_id.map(|p| link_of(p, &links)),
@@ -290,10 +305,12 @@ impl Ado<'_> {
         }
     }
 
-    /// Replaces the text of a comment. Azure DevOps only lets its author do this.
-    pub async fn edit_comment(&self, id: u64, comment_id: u64, text: &str) -> Result<(), String> {
+    /// Replaces the text of a comment. Azure DevOps only lets its author do this. A
+    /// Markdown comment stays Markdown; an HTML one gets the text as HTML.
+    pub async fn edit_comment(&self, id: u64, comment_id: u64, text: &str, markdown: bool) -> Result<(), String> {
         let api = self.settings.project_api();
-        self.call(reqwest::Method::PATCH, format!("{api}/wit/workItems/{id}/comments/{comment_id}?{COMMENTS_API}"), Some(json!({ "text": text_to_html(text) })))
+        let (body, format) = if markdown { (text.to_string(), "&format=markdown") } else { (text_to_html(text), "") };
+        self.call(reqwest::Method::PATCH, format!("{api}/wit/workItems/{id}/comments/{comment_id}?{COMMENTS_API}{format}"), Some(json!({ "text": body })))
             .await
             .map(|_| ())
             .map_err(|e| {
@@ -312,6 +329,38 @@ impl Ado<'_> {
             .map(|_| ())
             .map_err(write_error)
     }
+}
+
+impl Ado<'_> {
+    /// People in the organization matching a name or email, for assigning tickets.
+    pub async fn search_people(&self, query: &str) -> Result<Vec<PersonHit>, String> {
+        let body = json!({
+            "query": query,
+            "identityTypes": ["user"],
+            "operationScopes": ["ims", "source"],
+            "options": { "MinResults": 1, "MaxResults": 20 },
+            "properties": ["DisplayName", "Mail", "SignInAddress"],
+        });
+        let v = self.call(reqwest::Method::POST, format!("{}/_apis/IdentityPicker/Identities?api-version=7.1-preview.1", self.settings.org_url()), Some(body)).await?;
+        Ok(people_hits(&v))
+    }
+}
+
+fn people_hits(v: &Value) -> Vec<PersonHit> {
+    let mut out: Vec<PersonHit> = Vec::new();
+    for i in v["results"].as_array().into_iter().flatten().flat_map(|r| r["identities"].as_array().into_iter().flatten()) {
+        let name = i["displayName"].as_str().unwrap_or("").trim();
+        let unique = i["signInAddress"].as_str().filter(|s| !s.is_empty()).or_else(|| i["mail"].as_str()).unwrap_or("").trim();
+        if !name.is_empty() && !unique.is_empty() && !out.iter().any(|p| p.unique.eq_ignore_ascii_case(unique)) {
+            out.push(PersonHit { name: name.to_string(), unique: unique.to_string() });
+        }
+    }
+    out
+}
+
+/// Azure DevOps marks Markdown fields and comments as "markdown" (or 0 as a number).
+fn is_markdown(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("markdown")) || v.as_u64() == Some(0)
 }
 
 fn link_id(url: &str) -> Option<u64> {
@@ -367,6 +416,7 @@ fn parse_comments(v: &Value, me: Option<&str>) -> Vec<Comment> {
             html: c["text"].as_str().unwrap_or("").to_string(),
             mine: me.is_some_and(|me| c["createdBy"]["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(me))),
             edited: c["version"].as_u64().is_some_and(|v| v > 1),
+            markdown: is_markdown(&c["format"]),
         })
         .collect()
 }
@@ -385,6 +435,8 @@ fn shown(v: &Value) -> Option<String> {
 
 /// Creation and changes to the tracked fields, newest first, at most 20.
 fn history(updates: &Value) -> Vec<HistoryEntry> {
+    // Updates that only add links keep the revision number, so several can say rev 1.
+    let mut created = false;
     let mut out: Vec<HistoryEntry> = updates["value"]
         .as_array()
         .into_iter()
@@ -394,7 +446,8 @@ fn history(updates: &Value) -> Vec<HistoryEntry> {
             // revisedDate is when a revision was replaced (year 9999 for the latest), so prefer ChangedDate.
             let at = f["System.ChangedDate"]["newValue"].as_str().or_else(|| u["revisedDate"].as_str().filter(|d| !d.starts_with("9999"))).unwrap_or("").to_string();
             let by = owner_of(&u["revisedBy"]).1.unwrap_or_else(|| "Someone".into());
-            if u["rev"].as_u64() == Some(1) {
+            if u["rev"].as_u64() == Some(1) && !created {
+                created = true;
                 return Some(HistoryEntry { by, at, created: true, changes: vec![] });
             }
             let changes: Vec<FieldChange> = TRACKED
@@ -468,8 +521,11 @@ mod tests {
             } },
             { "rev": 3, "revisedBy": { "displayName": "Sam Roe" }, "fields": { "System.Description": { "oldValue": "a", "newValue": "b" } } },
         ]});
+        let mut u = u;
+        // A link added right after creation keeps rev 1; it isn't a second creation.
+        u["value"].as_array_mut().unwrap().insert(1, json!({ "rev": 1, "revisedBy": { "displayName": "Alex Doe" }, "relations": { "added": [{}] } }));
         let h = history(&u);
-        assert_eq!(h.len(), 2, "description-only updates are left out");
+        assert_eq!(h.len(), 2, "description-only and link-only updates are left out");
         assert_eq!(h[0].by, "Sam Roe");
         assert_eq!(h[0].at, "2026-11-02T10:00:00Z");
         assert_eq!(h[0].changes, vec![
@@ -527,7 +583,9 @@ mod tests {
                 ("GET", p) if p.ends_with("/wit/workitems/7") => json!({ "id": 7, "rev": 4,
                     "fields": { "System.WorkItemType": "Bug", "System.Title": "Login loops", "System.State": "New", "System.Tags": "web; auth",
                         "System.AssignedTo": { "displayName": "Sam Roe", "uniqueName": "sam.roe@example.com" },
-                        "Microsoft.VSTS.TCM.ReproSteps": "<p>Sign out, then in</p>", "System.Description": "" },
+                        "Microsoft.VSTS.TCM.ReproSteps": "<p>Sign out, then in</p>", "System.Description": "",
+                        "Microsoft.VSTS.Common.AcceptanceCriteria": "- works\n- **fast**" },
+                    "multilineFieldsFormat": { "Microsoft.VSTS.Common.AcceptanceCriteria": "markdown" },
                     "relations": [{ "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "http://x/_apis/wit/workItems/10" }] }),
                 ("GET", p) if p.ends_with("/wit/workitemtypes/Bug") => json!({ "states": [{ "name": "New" }, { "name": "Committed" }, { "name": "Done" }],
                     "fields": [{ "referenceName": PRIORITY }, { "referenceName": "Microsoft.VSTS.Scheduling.Effort" }, { "referenceName": "System.Title" }] }),
@@ -540,6 +598,21 @@ mod tests {
                     let b: Value = serde_json::from_slice(&body).unwrap();
                     assert_eq!(b["text"], "Seen it<br>twice", "text goes as HTML");
                     json!({ "id": 2, "version": 2 })
+                }
+                ("PATCH", p) if p.ends_with("/comments/3") => {
+                    assert!(u.query().unwrap_or("").contains("format=markdown"), "a Markdown comment stays Markdown");
+                    let b: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(b["text"], "**Seen** it", "Markdown goes as written");
+                    json!({ "id": 3, "version": 2 })
+                }
+                ("POST", p) if p.ends_with("/_apis/IdentityPicker/Identities") => {
+                    let b: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(b["query"], "sam");
+                    json!({ "results": [{ "identities": [
+                        { "displayName": "Sam Roe", "signInAddress": "sam.roe@example.com" },
+                        { "displayName": "Sam Roe", "mail": "SAM.ROE@example.com" },
+                        { "displayName": "No Address" },
+                    ] }] })
                 }
                 ("PATCH", p) if p.contains("/comments/") => return (StatusCode::FORBIDDEN, axum::Json(json!({ "message": "TF401181: You do not have permission to update this comment." }))).into_response(),
                 ("GET", p) if p.ends_with("/updates") => json!({ "value": [] }),
@@ -573,15 +646,18 @@ mod tests {
         assert_eq!((t.rev, t.kind.as_str(), t.state.as_str()), (4, "Bug", "New"));
         assert_eq!(t.assigned_to, Some(Person { name: "Sam Roe".into(), unique: Some("sam.roe@example.com".into()) }));
         assert_eq!(t.tags, ["web", "auth"]);
-        assert_eq!(t.sections.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Repro steps"], "empty Description is left out");
+        assert_eq!(t.sections.iter().map(|s| (s.label.as_str(), s.markdown)).collect::<Vec<_>>(), [("Repro steps", false), ("Acceptance criteria", true)], "empty Description is left out");
         assert_eq!(t.states.len(), 3);
         assert!(t.has_priority);
         assert_eq!(t.numbers, [NumberField { field: "Microsoft.VSTS.Scheduling.Effort".into(), label: "Effort".into(), value: None }], "only the estimates the type has");
         assert_eq!(t.parent.as_ref().map(|p| (p.id, p.title.as_str())), Some((10, "Auth rework")));
         assert_eq!(t.comments[0].author, "Alex Doe");
         assert_eq!(t.comments.iter().map(|c| (c.id, c.mine)).collect::<Vec<_>>(), [(2, true), (1, false)]);
-        ado.edit_comment(7, 2, "Seen it\ntwice").await.unwrap();
-        assert_eq!(ado.edit_comment(7, 1, "mine now").await.unwrap_err(), "Azure DevOps only lets the person who wrote a comment change it.");
+        ado.edit_comment(7, 2, "Seen it\ntwice", false).await.unwrap();
+        assert_eq!(ado.edit_comment(7, 1, "mine now", false).await.unwrap_err(), "Azure DevOps only lets the person who wrote a comment change it.");
+        ado.edit_comment(7, 3, "**Seen** it", true).await.unwrap();
+        let hits = ado.search_people("sam").await.unwrap();
+        assert_eq!(hits, [PersonHit { name: "Sam Roe".into(), unique: "sam.roe@example.com".into() }]);
         assert!(t.missing.is_empty(), "{:?}", t.missing);
 
         let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new() };

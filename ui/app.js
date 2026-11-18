@@ -470,6 +470,86 @@
       ...[...people].sort(([a], [b]) => a.localeCompare(b)).map(([n, v]) => [v, n])];
   }
 
+  /* ---------- person picker: type to find someone on the board or in the organization ---------- */
+  // Markup: a text box the user types in, a hidden input holding the chosen sign-in name
+  // ("" is Unassigned), and the suggestion list. initPicker() wires it up.
+  let pickN = 0;
+  const pickerHtml = (hidden, value, label) => {
+    const id = `pick${++pickN}`;
+    return `<div class="pick"><input type="text" class="pick-in" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}" autocomplete="off" spellcheck="false" placeholder="Unassigned · type a name or email" value="${esc(label)}">`
+      + `<input type="hidden" ${hidden} value="${esc(value)}" data-was="${esc(value)}"><ul class="pick-list" id="${id}" role="listbox" hidden></ul></div>`;
+  };
+  const SEARCHED = new Map(); // query -> people found in the organization
+  const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+  function initPicker(root, extra) {
+    const input = root.querySelector(".pick-in"), hidden = root.querySelector("input[type=hidden]"), list = root.querySelector(".pick-list");
+    const local = () => peopleOptions(extra).map(([value, label]) => ({ value, label }));
+    let shown = [], active = -1, timer = 0, label = input.value;
+    const norm = (x) => String(x || "").toLowerCase();
+    const candidates = (q) => {
+      const all = local();
+      for (const p of SEARCHED.get(norm(q)) || []) if (!all.some((x) => norm(x.value) === norm(p.unique))) all.push({ value: p.unique, label: p.name });
+      if (!q) return all;
+      return all.filter((x) => x.value && (norm(x.label).includes(norm(q)) || norm(x.value).includes(norm(q))));
+    };
+    const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); active = -1; };
+    const paint = () => {
+      const q = input.value.trim() === label ? "" : input.value.trim();
+      shown = candidates(q).slice(0, 50);
+      if (!shown.length) { list.innerHTML = `<li class="pick-none">${q.length < 2 ? "No match" : SEARCHED.has(norm(q)) ? "No one found" : "Searching…"}</li>`; }
+      else list.innerHTML = shown.map((x, i) => `<li role="option" id="${list.id}-${i}" data-i="${i}"${i === active ? ` class="on" aria-selected="true"` : ""}>${esc(x.label)}${x.value && norm(x.value) !== norm(x.label) && !x.label.startsWith("Me (") ? ` <span class="muted">${esc(x.value)}</span>` : ""}</li>`).join("");
+      list.hidden = false; input.setAttribute("aria-expanded", "true");
+      if (active >= 0) { input.setAttribute("aria-activedescendant", `${list.id}-${active}`); list.querySelector(".on")?.scrollIntoView({ block: "nearest" }); }
+    };
+    const choose = (x) => {
+      label = x.value ? x.label : "";
+      input.value = label;
+      if (hidden.value !== x.value) { hidden.value = x.value; hidden.dispatchEvent(new Event("change", { bubbles: true })); }
+      close();
+    };
+    // What a typed text means when the user leaves the box without picking from the list.
+    const settle = () => {
+      const t = input.value.trim();
+      if (t === label) return;
+      if (!t) return choose({ value: "", label: "" });
+      const found = candidates(t).filter((x) => x.value);
+      const hit = found.find((x) => norm(x.label) === norm(t) || norm(x.value) === norm(t)) || (found.length === 1 ? found[0] : null);
+      if (hit) return choose(hit);
+      if (EMAIL.test(t)) return choose({ value: t, label: t });
+      input.value = label; // nothing matches: keep what was there
+    };
+    const search = (q) => {
+      clearTimeout(timer);
+      if (q.length < 2 || SEARCHED.has(norm(q))) return;
+      timer = setTimeout(async () => {
+        try { SEARCHED.set(norm(q), await invoke("search_people", { query: q })); } catch { SEARCHED.set(norm(q), []); }
+        if (document.activeElement === input && input.value.trim() === q) paint();
+      }, 250);
+    };
+    input.addEventListener("focus", () => { input.select(); active = -1; paint(); });
+    input.addEventListener("input", () => { active = -1; paint(); search(input.value.trim()); });
+    input.addEventListener("blur", () => { settle(); close(); });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (list.hidden) paint();
+        if (shown.length) { active = (active + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length; paint(); }
+      } else if (e.key === "Enter") {
+        // Enter picks the highlighted person; otherwise it settles what was typed (and a form may submit).
+        if (!list.hidden && active >= 0 && shown[active]) { e.preventDefault(); choose(shown[active]); }
+        else { if (!list.hidden) e.preventDefault(); settle(); close(); }
+      } else if (e.key === "Escape" && !list.hidden) {
+        e.preventDefault(); e.stopPropagation(); input.value = label; close();
+      }
+    });
+    list.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus in the box
+    list.addEventListener("click", (e) => { const li = e.target.closest("li[data-i]"); if (li) choose(shown[Number(li.dataset.i)]); });
+    root.pickSet = (value) => {
+      const x = candidates("").find((c) => norm(c.value) === norm(value)) || { value, label: value };
+      label = x.value ? x.label : ""; input.value = label; hidden.value = value;
+    };
+  }
+
   function fillTypes() {
     const sel = $("newForm").elements.namedItem("type");
     const want = [store.get("newType", ""), ...DEFAULT_TYPES].find((n) => TYPES.some((t) => t.name === n)) || TYPES[0]?.name;
@@ -493,10 +573,10 @@
     $("newWhere").textContent = `It goes to ${BOARD.subtitle.replace(/ · Azure Boards$/, "")}, so it shows on this board.`;
 
     const opts = peopleOptions();
-    const who = form.elements.namedItem("assignedTo");
-    who.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
     const lastWho = store.get("newAssignee", "");
-    who.value = opts.some(([v]) => v === lastWho) ? lastWho : "";
+    const was = opts.find(([v]) => v && v === lastWho);
+    $("newWho").innerHTML = pickerHtml(`name="assignedTo"`, was ? was[0] : "", was ? was[1] : "");
+    initPicker($("newWho").querySelector(".pick"));
 
     $("parentList").innerHTML = ALL.filter((t) => t.type !== "Task").sort((a, b) => b.id - a.id)
       .map((t) => `<option value="${esc(t.id)}">${esc(t.type)} · ${esc(t.title)}</option>`).join("");
@@ -575,6 +655,100 @@
     return out;
   }
 
+  /* ---------- Markdown: rendered to HTML text here, then cleaned by rich() like any other HTML ---------- */
+  const MD_LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+  const MD_BLOCK = /^\s{0,3}(```|~~~|#{1,6}\s|>|([-*_])(\s*\2){2,}\s*$)/;
+  function mdInline(text) {
+    const codes = [];
+    let t = esc(text).replace(/`([^`\n]+)`/g, (_, c) => { codes.push(`<code>${c}</code>`); return `\u0000${codes.length - 1}\u0000`; });
+    t = t.replace(/!?\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => `<a href="${url}">${label}</a>`)
+      .replace(/(^|[\s(])(https?:\/\/[^\s<]*[^\s<.,;:!?)\]'"])/g, (_, pre, url) => `${pre}<a href="${url}">${url}</a>`)
+      .replace(/\*\*(?=\S)([^*\n]+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|\W)__(?=\S)([^_\n]+?)__(?!\w)/g, "$1<strong>$2</strong>")
+      .replace(/(^|[^*\w])\*(?=[^\s*])([^*\n]+?)\*(?![*\w])/g, "$1<em>$2</em>")
+      .replace(/(^|[^\w])_(?=[^\s_])([^_\n]+?)_(?!\w)/g, "$1<em>$2</em>")
+      .replace(/~~(?=\S)([^~\n]+?)~~/g, "<del>$1</del>");
+    return t.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[i]);
+  }
+  function mdList(lines) {
+    const items = [];
+    for (const raw of lines) {
+      const m = MD_LIST.exec(raw);
+      if (m) items.push({ ind: m[1].replace(/\t/g, "    ").length, ord: /\d/.test(m[2]), text: m[3] });
+      else if (items.length) items[items.length - 1].text += "\n" + raw.trim();
+    }
+    const item = (text) => {
+      const task = /^\[([ xX])\]\s+/.exec(text);
+      const body = text.slice(task ? task[0].length : 0).split("\n").map(mdInline).join("<br>");
+      return (task ? (task[1] === " " ? "☐ " : "☑ ") : "") + body;
+    };
+    const build = (i) => {
+      const { ind, ord } = items[i];
+      let h = "";
+      while (i < items.length && items[i].ind >= ind) {
+        const it = items[i++];
+        let sub = "";
+        while (i < items.length && items[i].ind > ind) { const [x, j] = build(i); sub += x; i = j; }
+        h += `<li>${item(it.text)}${sub}</li>`;
+      }
+      return [ord ? `<ol>${h}</ol>` : `<ul>${h}</ul>`, i];
+    };
+    let h = "";
+    for (let i = 0; i < items.length;) { const [x, j] = build(i); h += x; i = j; }
+    return h;
+  }
+  function md(src) {
+    const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n");
+    const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => mdInline(c.trim()));
+    const out = [];
+    let i = 0, m;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { i++; continue; }
+      if ((m = /^\s{0,3}(```|~~~)/.exec(l))) {
+        const buf = [];
+        for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) buf.push(lines[i]);
+        i++;
+        out.push(`<pre><code>${esc(buf.join("\n"))}</code></pre>`);
+      } else if ((m = /^\s{0,3}(#{1,6})\s+(.*?)[\s#]*$/.exec(l))) {
+        out.push(`<h${m[1].length}>${mdInline(m[2])}</h${m[1].length}>`); i++;
+      } else if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(l)) {
+        out.push("<hr>"); i++;
+      } else if (/^\s{0,3}>/.test(l)) {
+        const buf = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i])) buf.push(lines[i++].replace(/^\s{0,3}>\s?/, ""));
+        out.push(`<blockquote>${md(buf.join("\n"))}</blockquote>`);
+      } else if (MD_LIST.test(l)) {
+        const buf = [];
+        while (i < lines.length && (MD_LIST.test(lines[i]) || (/^\s+\S/.test(lines[i]) && !MD_BLOCK.test(lines[i])))) buf.push(lines[i++]);
+        out.push(mdList(buf));
+      } else if (l.includes("|") && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[i + 1] || "")) {
+        const head = cells(l);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+        out.push(`<table><thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      } else {
+        const buf = [];
+        while (i < lines.length && lines[i].trim() && !MD_BLOCK.test(lines[i]) && !(buf.length && MD_LIST.test(lines[i]))) buf.push(lines[i++]);
+        out.push(`<p>${buf.map((x) => mdInline(x.trim())).join("<br>")}</p>`);
+      }
+    }
+    return out.join("");
+  }
+  // Markdown typed into an ordinary (HTML) field arrives as plain text: render it too. Real
+  // formatting (bold, lists, links made in the editor) means it's HTML, and stays as it is.
+  function looksLikeMarkdown(html) {
+    const body = new DOMParser().parseFromString(String(html || ""), "text/html").body;
+    if ([...body.querySelectorAll("*")].some((e) => !/^(DIV|P|BR|SPAN)$/.test(e.nodeName))) return false;
+    const t = commentText(html, true);
+    return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s+\S|\d+[.)]\s+\S|>\s?\S|```)/.test(t) || /\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/|`[^`\n]+`/.test(t);
+  }
+  // A field or comment as cleaned DOM nodes, rendering Markdown where there is some.
+  function richText(text, markdown) {
+    return rich(markdown ? md(text) : looksLikeMarkdown(text) ? md(commentText(text, true)) : text);
+  }
+
   let TK = null;           // the ticket on show
   const tkBack = [];        // ids to go back to, from opening linked tickets
   const tkKind = (type) => ({ Incident: "incident", "Product Backlog Item": "pbi", PBI: "pbi", Task: "task", Bug: "bug" }[type] || "other");
@@ -621,9 +795,7 @@
   function renderTicket(t, note = "") {
     TK = t;
     const states = t.states.map((s) => `<option${s.name === t.state ? " selected" : ""}>${esc(s.name)}</option>`).join("");
-    const people = peopleOptions(t.assignedTo);
-    const curWho = t.assignedTo ? (people.find(([v, l]) => v === t.assignedTo.unique || l === t.assignedTo.name || l === `Me (${t.assignedTo.name})`)?.[0] ?? "") : "";
-    const who = people.map(([v, l]) => `<option value="${esc(v)}"${v === curWho ? " selected" : ""}>${esc(l)}</option>`).join("");
+    const curWho = t.assignedTo ? t.assignedTo.unique || t.assignedTo.name : "";
     const prio = [1, 2, 3, 4].map((p) => `<option value="${p}"${p === t.priority ? " selected" : ""}>${p}</option>`).join("");
     const when = (at) => (at ? esc(fmt(at)) : "");
     const meta = [
@@ -645,7 +817,7 @@
       <h2 class="tk-title" id="tkTitle">${esc(t.title)}</h2>
       <div class="tk-edit">
         <label>State<select data-f="state">${states}</select></label>
-        <label>Assigned to<select data-f="assignedTo">${who}</select></label>
+        <label class="who">Assigned to${pickerHtml(`data-f="assignedTo"`, curWho, t.assignedTo?.name || "")}</label>
         ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
         ${t.numbers.map((n) => `<label class="num">${esc(n.label)}<input type="number" min="0" step="any" inputmode="decimal" data-n="${esc(n.field)}" value="${n.value ?? ""}" placeholder="—"></label>`).join("")}
         <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
@@ -665,7 +837,7 @@
     const sec = $("tkSections");
     for (const s of t.sections) {
       const h = document.createElement("h3"); h.textContent = s.label;
-      const d = document.createElement("div"); d.className = "rich"; d.append(rich(s.html));
+      const d = document.createElement("div"); d.className = "rich"; d.append(richText(s.html, s.markdown));
       sec.append(h, d);
     }
     if (!t.sections.length) sec.innerHTML = `<p class="muted">No description.</p>`;
@@ -674,9 +846,10 @@
       const li = document.createElement("li");
       li.dataset.comment = c.id;
       li.innerHTML = `<div class="tk-c-head"><b>${esc(c.author)}</b><time>${when(c.at)}</time>${c.edited ? `<span class="muted">edited</span>` : ""}${c.mine ? `<button class="linkbtn tk-c-editbtn" type="button" data-tk="edit-comment" aria-label="Edit your comment from ${when(c.at)}">Edit</button>` : ""}</div>`;
-      const d = document.createElement("div"); d.className = "rich"; d.append(rich(c.html));
+      const d = document.createElement("div"); d.className = "rich"; d.append(richText(c.html, c.markdown));
       li.append(d); cl.append(li);
     }
+    initPicker($("tk").querySelector(".pick"), t.assignedTo);
     $("ticket").setAttribute("aria-labelledby", "tkTitle");
   }
 
@@ -687,8 +860,7 @@
     const st = tkField("state")?.value;
     if (st && st !== TK.state) out.state = st;
     const who = tkField("assignedTo");
-    const was = [...who.options].find((o) => o.defaultSelected)?.value ?? "";
-    if (who.value !== was) out.assignedTo = who.value;
+    if (who && who.value !== who.dataset.was) out.assignedTo = who.value; // hidden inputs have no separate default
     const p = tkField("priority");
     if (p && p.value && Number(p.value) !== TK.priority) out.priority = Number(p.value);
     // Estimates: a changed number is sent, a cleared one is sent as null (removed).
@@ -729,18 +901,19 @@
   function tkRerender(t, note) {
     const { numbers = {}, ...fields } = tkChanges();
     renderTicket(t, note);
-    for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el) el.value = String(v); }
+    for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el?.closest(".pick")) el.closest(".pick").pickSet(String(v)); else if (el) el.value = String(v); }
     for (const [k, v] of Object.entries(numbers)) { const el = $("tk").querySelector(`[data-n="${CSS.escape(k)}"]`); if (el) el.value = v ?? ""; }
     tkDirty();
   }
 
-  // A comment as plain text for editing: line breaks kept, markup dropped.
-  function commentText(html) {
+  // A comment as plain text for editing: line breaks kept, markup dropped. With `keep`,
+  // runs of spaces stay too (indents in Markdown).
+  function commentText(html, keep = false) {
     const body = new DOMParser().parseFromString(String(html || ""), "text/html").body;
     let out = "";
     const walk = (n) => {
       for (const c of n.childNodes) {
-        if (c.nodeType === 3) out += c.nodeValue.replace(/\s+/g, " ");
+        if (c.nodeType === 3) out += keep ? c.nodeValue.replace(/\u00a0/g, " ").replace(/\n/g, " ") : c.nodeValue.replace(/\s+/g, " ");
         else if (c.nodeName === "BR") out += "\n";
         else if (c.nodeType === 1) {
           const block = /^(DIV|P|LI|H[1-6]|TR|BLOCKQUOTE|PRE|UL|OL|TABLE)$/.test(c.nodeName);
@@ -751,7 +924,8 @@
       }
     };
     walk(body);
-    return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    out = out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+    return keep ? out.replace(/^\n+|\s+$/g, "") : out.trim();
   }
   // True when editing as plain text would drop something: formatting, links, mentions, images.
   const commentHasMarkup = (html) => [...new DOMParser().parseFromString(String(html || ""), "text/html").body.querySelectorAll("*")].some((e) => !/^(DIV|P|BR|SPAN)$/.test(e.nodeName) || e.attributes.length);
@@ -762,10 +936,10 @@
     const box = document.createElement("div");
     box.className = "tk-c-edit";
     box.innerHTML = `<textarea rows="4" aria-label="Edit your comment"></textarea>
-      ${commentHasMarkup(c.html) ? `<p class="hint">Saving here keeps the text only: this comment's formatting, links or mentions will be removed. To keep them, edit it in Azure DevOps.</p>` : ""}
+      ${!c.markdown && commentHasMarkup(c.html) ? `<p class="hint">Saving here keeps the text only: this comment's formatting, links or mentions will be removed. To keep them, edit it in Azure DevOps.</p>` : ""}
       <div class="tk-c-actions"><button class="btn primary" type="button" data-tk="save-comment">Save</button><button class="linkbtn" type="button" data-tk="cancel-comment">Cancel</button></div>`;
     const ta = box.querySelector("textarea");
-    ta.value = ta.defaultValue = commentText(c.html);
+    ta.value = ta.defaultValue = c.markdown ? c.html : commentText(c.html, looksLikeMarkdown(c.html));
     li.querySelector(".rich").hidden = true;
     li.querySelector(".tk-c-editbtn").hidden = true;
     li.append(box);
@@ -783,7 +957,8 @@
     const btn = li.querySelector('[data-tk="save-comment"]'); btn.disabled = true; btn.textContent = "Saving…";
     showErr("tkErr", "");
     try {
-      tkRerender(await invoke("edit_comment", { id: TK.id, commentId: Number(li.dataset.comment), text }), "Comment updated.");
+      const c = TK.comments.find((x) => String(x.id) === li.dataset.comment);
+      tkRerender(await invoke("edit_comment", { id: TK.id, commentId: Number(li.dataset.comment), text, markdown: !!c?.markdown }), "Comment updated.");
     } catch (e) {
       showErr("tkErr", String(e?.message || e));
       btn.disabled = false; btn.textContent = "Save";
