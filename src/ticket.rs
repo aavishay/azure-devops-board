@@ -114,9 +114,13 @@ pub struct Link {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Comment {
+    pub id: u64,
     pub author: String,
     pub at: String,
     pub html: String,
+    /// Written by the signed-in user, who can edit it.
+    pub mine: bool,
+    pub edited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -163,7 +167,7 @@ impl Ado<'_> {
         let (parent_id, child_ids) = hierarchy(&w["relations"]);
         let linked: Vec<u64> = parent_id.into_iter().chain(child_ids.iter().copied()).collect();
 
-        let (ty, comments, updates, links) = tokio::join!(
+        let (ty, comments, updates, links, me) = tokio::join!(
             self.call(reqwest::Method::GET, format!("{api}/wit/workitemtypes/{}?api-version=7.1", enc(&kind)), None),
             self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/comments?$top=50&order=desc&{COMMENTS_API}"), None),
             self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/updates?$top=200&api-version=7.1"), None),
@@ -174,7 +178,10 @@ impl Ado<'_> {
                     self.batch(&linked, &["System.Id", "System.Title", "System.State", "System.WorkItemType"]).await
                 }
             },
+            // Who is signed in, to offer editing on their own comments.
+            self.call(reqwest::Method::GET, format!("{}/_apis/connectionData", self.settings.org_url()), None),
         );
+        let me = me.ok().and_then(|v| v["authenticatedUser"]["id"].as_str().map(String::from));
 
         let mut missing = Vec::new();
         let link_of = |id: u64, ws: &[Value]| {
@@ -202,7 +209,7 @@ impl Ado<'_> {
             .map(|(k, label)| NumberField { field: k.to_string(), label: label.to_string(), value: f[*k].as_f64() })
             .collect();
         let comments = match &comments {
-            Ok(c) => parse_comments(c),
+            Ok(c) => parse_comments(c, me.as_deref()),
             Err(_) => {
                 missing.push("the discussion".into());
                 vec![]
@@ -283,6 +290,21 @@ impl Ado<'_> {
         }
     }
 
+    /// Replaces the text of a comment. Azure DevOps only lets its author do this.
+    pub async fn edit_comment(&self, id: u64, comment_id: u64, text: &str) -> Result<(), String> {
+        let api = self.settings.project_api();
+        self.call(reqwest::Method::PATCH, format!("{api}/wit/workItems/{id}/comments/{comment_id}?{COMMENTS_API}"), Some(json!({ "text": text_to_html(text) })))
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                if e.contains(" 403:") || e.to_lowercase().contains("permission") {
+                    "Azure DevOps only lets the person who wrote a comment change it.".into()
+                } else {
+                    write_error(e)
+                }
+            })
+    }
+
     pub async fn comment(&self, id: u64, text: &str) -> Result<(), String> {
         let api = self.settings.project_api();
         self.call(reqwest::Method::POST, format!("{api}/wit/workItems/{id}/comments?{COMMENTS_API}"), Some(json!({ "text": text_to_html(text) })))
@@ -331,16 +353,20 @@ fn required_field(e: &str) -> Option<&str> {
     code.starts_with("Required").then_some(field.trim()).filter(|f| !f.is_empty())
 }
 
-fn parse_comments(v: &Value) -> Vec<Comment> {
+/// The discussion, newest first; `me` is the signed-in user's identity id.
+fn parse_comments(v: &Value, me: Option<&str>) -> Vec<Comment> {
     v["comments"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|c| !c["isDeleted"].as_bool().unwrap_or(false))
         .map(|c| Comment {
+            id: c["id"].as_u64().unwrap_or(0),
             author: owner_of(&c["createdBy"]).1.unwrap_or_else(|| "Someone".into()),
             at: c["createdDate"].as_str().unwrap_or("").to_string(),
             html: c["text"].as_str().unwrap_or("").to_string(),
+            mine: me.is_some_and(|me| c["createdBy"]["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(me))),
+            edited: c["version"].as_u64().is_some_and(|v| v > 1),
         })
         .collect()
 }
@@ -505,7 +531,17 @@ mod tests {
                     "relations": [{ "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "http://x/_apis/wit/workItems/10" }] }),
                 ("GET", p) if p.ends_with("/wit/workitemtypes/Bug") => json!({ "states": [{ "name": "New" }, { "name": "Committed" }, { "name": "Done" }],
                     "fields": [{ "referenceName": PRIORITY }, { "referenceName": "Microsoft.VSTS.Scheduling.Effort" }, { "referenceName": "System.Title" }] }),
-                ("GET", p) if p.ends_with("/comments") => json!({ "comments": [{ "createdBy": { "displayName": "Alex Doe" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" }] }),
+                ("GET", p) if p.ends_with("/comments") => json!({ "comments": [
+                    { "id": 2, "createdBy": { "displayName": "Alex Doe", "id": "me-1" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" },
+                    { "id": 1, "createdBy": { "displayName": "Sam Roe", "id": "other-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "<div>Found it</div>" },
+                ] }),
+                ("GET", p) if p.ends_with("/_apis/connectionData") => json!({ "authenticatedUser": { "id": "me-1", "providerDisplayName": "Alex Doe" } }),
+                ("PATCH", p) if p.ends_with("/comments/2") => {
+                    let b: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(b["text"], "Seen it<br>twice", "text goes as HTML");
+                    json!({ "id": 2, "version": 2 })
+                }
+                ("PATCH", p) if p.contains("/comments/") => return (StatusCode::FORBIDDEN, axum::Json(json!({ "message": "TF401181: You do not have permission to update this comment." }))).into_response(),
                 ("GET", p) if p.ends_with("/updates") => json!({ "value": [] }),
                 ("POST", p) if p.ends_with("/workitemsbatch") => json!({ "value": [{ "id": 10, "fields": { "System.Title": "Auth rework", "System.State": "Committed", "System.WorkItemType": "Product Backlog Item" } }] }),
                 ("PATCH", _) => {
@@ -543,6 +579,9 @@ mod tests {
         assert_eq!(t.numbers, [NumberField { field: "Microsoft.VSTS.Scheduling.Effort".into(), label: "Effort".into(), value: None }], "only the estimates the type has");
         assert_eq!(t.parent.as_ref().map(|p| (p.id, p.title.as_str())), Some((10, "Auth rework")));
         assert_eq!(t.comments[0].author, "Alex Doe");
+        assert_eq!(t.comments.iter().map(|c| (c.id, c.mine)).collect::<Vec<_>>(), [(2, true), (1, false)]);
+        ado.edit_comment(7, 2, "Seen it\ntwice").await.unwrap();
+        assert_eq!(ado.edit_comment(7, 1, "mine now").await.unwrap_err(), "Azure DevOps only lets the person who wrote a comment change it.");
         assert!(t.missing.is_empty(), "{:?}", t.missing);
 
         let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new() };
@@ -562,8 +601,20 @@ mod tests {
             { "createdBy": { "displayName": "Alex Doe" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Looks good</div>" },
             { "createdBy": { "displayName": "Sam Roe" }, "isDeleted": true, "text": "gone" },
         ]});
-        let c = parse_comments(&c);
+        let c = parse_comments(&c, None);
         assert_eq!(c.len(), 1);
         assert_eq!((c[0].author.as_str(), c[0].html.as_str()), ("Alex Doe", "<div>Looks good</div>"));
+    }
+
+    #[test]
+    fn own_and_edited_comments() {
+        let c = json!({ "comments": [
+            { "id": 9, "version": 2, "createdBy": { "displayName": "Alex Doe", "id": "AAAA-1" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Looks good</div>" },
+            { "id": 7, "version": 1, "createdBy": { "displayName": "Sam Roe", "id": "bbbb-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "first" },
+        ]});
+        let c = parse_comments(&c, Some("aaaa-1"));
+        assert_eq!((c[0].id, c[0].mine, c[0].edited), (9, true, true), "ids compare without case");
+        assert_eq!((c[1].id, c[1].mine, c[1].edited), (7, false, false));
+        assert!(parse_comments(&json!({ "comments": [{ "id": 1, "createdBy": { "id": "x" } }] }), None).iter().all(|c| !c.mine), "unknown user: nothing is mine");
     }
 }
