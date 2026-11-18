@@ -350,6 +350,18 @@ pub async fn add_comment(state: &AppState, id: u64, text: String) -> Result<Tick
     ado.ticket(id).await
 }
 
+/// Changes the text of one of your comments and returns the ticket with it.
+pub async fn edit_comment(state: &AppState, id: u64, comment_id: u64, text: String) -> Result<Ticket, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("A comment can't be empty. To remove it, delete it in Azure DevOps.".into());
+    }
+    let (s, auth) = state.signed_in().await?;
+    let ado = Ado { http: &state.http, settings: &s, auth };
+    ado.edit_comment(id, comment_id, text).await?;
+    ado.ticket(id).await
+}
+
 /* ---------------------------------------------------------------- state */
 
 impl AppState {

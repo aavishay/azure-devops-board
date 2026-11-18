@@ -227,8 +227,7 @@
       : c.kind === "owner" ? `${esc(c.from || "Unassigned")} → ${esc(c.to || "Unassigned")}`
       : "";
     $("history").innerHTML = h.map((c) => {
-      const url = ALL.find((t) => t.id === c.id)?.url || (BOARD.boardUrl.replace(/_boards.*$/, "") + "_workitems/edit/" + c.id);
-      return `<li><time>${esc(fmt(c.at))}</time><a class="hid" href="${esc(url)}" target="_blank" rel="noopener" data-ticket="${esc(c.id)}">#${esc(c.id)}</a><span class="what ${esc(c.kind)}">${what(c)}</span><span class="tt" title="${esc(c.title)}">${esc(c.title)}</span></li>`;
+      return `<li><time>${esc(fmt(c.at))}</time>${ticketLink(c.id, undefined, "hid")}<span class="what ${esc(c.kind)}">${what(c)}</span><span class="tt" title="${esc(c.title)}">${esc(c.title)}</span></li>`;
     }).join("");
   }
 
@@ -267,11 +266,16 @@
   }
   function clearErrorNotice() { if (noticeKey === "err") $("notice").hidden = true; }
 
+  // A ticket number that opens the ticket in the drawer; Cmd/Ctrl-click opens Azure DevOps.
+  function ticketUrl(id) { return ALL.find((t) => t.id === id)?.url || (BOARD?.boardUrl || "").replace(/_boards.*$/, "") + "_workitems/edit/" + id; }
+  function ticketLink(id, url = ticketUrl(id), cls = "") { return `<a${cls ? ` class="${cls}"` : ""} href="${esc(url)}" target="_blank" rel="noopener" data-ticket="${esc(id)}">#${esc(id)}</a>`; }
+
   function changesHtml(changes) {
-    const t = (c) => c.kind === "added" ? `<b>#${esc(c.id)}</b> appeared: ${esc(c.title)}`
-      : c.kind === "removed" ? `<b>#${esc(c.id)}</b> left the board: ${esc(c.title)}`
-      : c.kind === "state" ? `<b>#${esc(c.id)}</b> ${esc(c.from)} → ${esc(c.to)}`
-      : `<b>#${esc(c.id)}</b> owner ${esc(c.from || "unassigned")} → ${esc(c.to || "unassigned")}`;
+    const n = (c) => `<b>${ticketLink(c.id)}</b>`;
+    const t = (c) => c.kind === "added" ? `${n(c)} appeared: ${esc(c.title)}`
+      : c.kind === "removed" ? `${n(c)} left the board: ${esc(c.title)}`
+      : c.kind === "state" ? `${n(c)} ${esc(c.from)} → ${esc(c.to)}`
+      : `${n(c)} owner ${esc(c.from || "unassigned")} → ${esc(c.to || "unassigned")}`;
     return `<ul>${changes.slice(0, 12).map((c) => `<li>${t(c)}</li>`).join("")}</ul>${changes.length > 12 ? `…and ${changes.length - 12} more` : ""}`;
   }
 
@@ -529,7 +533,7 @@
       store.set("newType", ticket.type); store.set("newAssignee", ticket.assignedTo);
       $("newTicket").close();
       form.reset();
-      notice("ok", `<b>Created <a href="${esc(c.url)}" target="_blank" rel="noopener">#${esc(c.id)}</a></b> ${esc(c.title)}`);
+      notice("ok", `<b>Created ${ticketLink(c.id, c.url)}</b> ${esc(c.title)}`);
       refresh("created");
     } catch (e) {
       showErr("newErr", String(e?.message || e));
@@ -579,7 +583,7 @@
   let tkOpener = null;      // what had focus before the drawer opened, to return to
   // Unsaved quick edits are only thrown away with the user's say-so.
   function tkLeave() {
-    const n = Object.keys(tkChanges()).length;
+    const n = Object.keys(tkChanges()).length + [...$("tk").querySelectorAll(".tk-c-edit textarea")].filter((x) => x.value !== x.defaultValue).length;
     return !n || confirm(`Discard your unsaved change${n > 1 ? "s" : ""} to #${TK.id}?`);
   }
   function markOpen(id) {
@@ -668,7 +672,8 @@
     const cl = $("tkComments");
     for (const c of t.comments) {
       const li = document.createElement("li");
-      li.innerHTML = `<div class="tk-c-head"><b>${esc(c.author)}</b><time>${when(c.at)}</time></div>`;
+      li.dataset.comment = c.id;
+      li.innerHTML = `<div class="tk-c-head"><b>${esc(c.author)}</b><time>${when(c.at)}</time>${c.edited ? `<span class="muted">edited</span>` : ""}${c.mine ? `<button class="linkbtn tk-c-editbtn" type="button" data-tk="edit-comment" aria-label="Edit your comment from ${when(c.at)}">Edit</button>` : ""}</div>`;
       const d = document.createElement("div"); d.className = "rich"; d.append(rich(c.html));
       li.append(d); cl.append(li);
     }
@@ -720,18 +725,78 @@
     }
   }
 
+  // Re-render the panel with a fresh ticket, keeping quick edits the user hasn't saved yet.
+  function tkRerender(t, note) {
+    const { numbers = {}, ...fields } = tkChanges();
+    renderTicket(t, note);
+    for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el) el.value = String(v); }
+    for (const [k, v] of Object.entries(numbers)) { const el = $("tk").querySelector(`[data-n="${CSS.escape(k)}"]`); if (el) el.value = v ?? ""; }
+    tkDirty();
+  }
+
+  // A comment as plain text for editing: line breaks kept, markup dropped.
+  function commentText(html) {
+    const body = new DOMParser().parseFromString(String(html || ""), "text/html").body;
+    let out = "";
+    const walk = (n) => {
+      for (const c of n.childNodes) {
+        if (c.nodeType === 3) out += c.nodeValue.replace(/\s+/g, " ");
+        else if (c.nodeName === "BR") out += "\n";
+        else if (c.nodeType === 1) {
+          const block = /^(DIV|P|LI|H[1-6]|TR|BLOCKQUOTE|PRE|UL|OL|TABLE)$/.test(c.nodeName);
+          if (block && out && !out.endsWith("\n")) out += "\n";
+          walk(c);
+          if (block && !out.endsWith("\n")) out += "\n";
+        }
+      }
+    };
+    walk(body);
+    return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  // True when editing as plain text would drop something: formatting, links, mentions, images.
+  const commentHasMarkup = (html) => [...new DOMParser().parseFromString(String(html || ""), "text/html").body.querySelectorAll("*")].some((e) => !/^(DIV|P|BR|SPAN)$/.test(e.nodeName) || e.attributes.length);
+
+  function tkEditComment(li) {
+    const c = TK.comments.find((x) => String(x.id) === li.dataset.comment);
+    if (!c || li.querySelector(".tk-c-edit")) return;
+    const box = document.createElement("div");
+    box.className = "tk-c-edit";
+    box.innerHTML = `<textarea rows="4" aria-label="Edit your comment"></textarea>
+      ${commentHasMarkup(c.html) ? `<p class="hint">Saving here keeps the text only: this comment's formatting, links or mentions will be removed. To keep them, edit it in Azure DevOps.</p>` : ""}
+      <div class="tk-c-actions"><button class="btn primary" type="button" data-tk="save-comment">Save</button><button class="linkbtn" type="button" data-tk="cancel-comment">Cancel</button></div>`;
+    const ta = box.querySelector("textarea");
+    ta.value = ta.defaultValue = commentText(c.html);
+    li.querySelector(".rich").hidden = true;
+    li.querySelector(".tk-c-editbtn").hidden = true;
+    li.append(box);
+    ta.focus();
+  }
+  function tkCancelComment(li) {
+    li.querySelector(".tk-c-edit")?.remove();
+    li.querySelector(".rich").hidden = false;
+    li.querySelector(".tk-c-editbtn").hidden = false;
+  }
+  async function tkSaveComment(li) {
+    const ta = li.querySelector(".tk-c-edit textarea"), text = ta.value.trim();
+    if (!text) { showErr("tkErr", "A comment can't be empty. To remove it, delete it in Azure DevOps."); return ta.focus(); }
+    if (text === ta.defaultValue.trim()) return tkCancelComment(li);
+    const btn = li.querySelector('[data-tk="save-comment"]'); btn.disabled = true; btn.textContent = "Saving…";
+    showErr("tkErr", "");
+    try {
+      tkRerender(await invoke("edit_comment", { id: TK.id, commentId: Number(li.dataset.comment), text }), "Comment updated.");
+    } catch (e) {
+      showErr("tkErr", String(e?.message || e));
+      btn.disabled = false; btn.textContent = "Save";
+    }
+  }
+
   async function tkComment() {
     const box = $("tkComment"), text = box.value.trim();
     if (!text) return box.focus();
     const btn = $("tk").querySelector('[data-tk="comment"]'); btn.disabled = true; btn.textContent = "Posting…";
     showErr("tkErr", "");
     try {
-      const keep = tkChanges(); // a pending edit survives posting a comment
-      renderTicket(await invoke("add_comment", { id: TK.id, text }), "Comment added.");
-      const { numbers = {}, ...fields } = keep;
-      for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el) el.value = String(v); }
-      for (const [k, v] of Object.entries(numbers)) { const el = $("tk").querySelector(`[data-n="${CSS.escape(k)}"]`); if (el) el.value = v ?? ""; }
-      tkDirty();
+      tkRerender(await invoke("add_comment", { id: TK.id, text }), "Comment added."); // a pending edit survives
     } catch (e) {
       showErr("tkErr", String(e?.message || e));
       btn.disabled = false; btn.textContent = "Comment";
@@ -857,11 +922,16 @@
     else if (what === "save") tkSave();
     else if (what === "discard") renderTicket(TK);
     else if (what === "comment") tkComment();
+    else if (what === "edit-comment") tkEditComment(b.closest("li"));
+    else if (what === "cancel-comment") tkCancelComment(b.closest("li"));
+    else if (what === "save-comment") tkSaveComment(b.closest("li"));
   });
   $("tk").addEventListener("change", (e) => { if (e.target.matches("[data-f],[data-n]")) tkDirty(); });
   $("tk").addEventListener("input", (e) => { if (e.target.matches("[data-n]")) tkDirty(); });
   $("tk").addEventListener("keydown", (e) => {
     if (e.target.id === "tkComment" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkComment(); }
+    else if (e.target.closest(".tk-c-edit") && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkSaveComment(e.target.closest("li")); }
+    else if (e.target.closest(".tk-c-edit") && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); tkCancelComment(e.target.closest("li")); }
     else if (e.target.matches("[data-n]") && e.key === "Enter") { e.preventDefault(); tkSave(); }
   });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
