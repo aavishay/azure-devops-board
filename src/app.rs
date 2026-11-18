@@ -10,7 +10,7 @@ use crate::auth::{self, AccessToken, KEY_PAT, KEY_REFRESH};
 use crate::board::{Ado, Change, Created, NewTicket, Snapshot, Store, TicketType};
 use crate::secrets::Secrets;
 use crate::settings::{AuthMode, Settings};
-use crate::ticket::{Ticket, TicketEdit};
+use crate::ticket::{PersonHit, Ticket, TicketEdit};
 
 pub struct AppState {
     http: reqwest::Client,
@@ -351,15 +351,25 @@ pub async fn add_comment(state: &AppState, id: u64, text: String) -> Result<Tick
 }
 
 /// Changes the text of one of your comments and returns the ticket with it.
-pub async fn edit_comment(state: &AppState, id: u64, comment_id: u64, text: String) -> Result<Ticket, String> {
+pub async fn edit_comment(state: &AppState, id: u64, comment_id: u64, text: String, markdown: bool) -> Result<Ticket, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("A comment can't be empty. To remove it, delete it in Azure DevOps.".into());
     }
     let (s, auth) = state.signed_in().await?;
     let ado = Ado { http: &state.http, settings: &s, auth };
-    ado.edit_comment(id, comment_id, text).await?;
+    ado.edit_comment(id, comment_id, text, markdown).await?;
     ado.ticket(id).await
+}
+
+/// People matching a name or email, to assign a ticket to.
+pub async fn search_people(state: &AppState, query: String) -> Result<Vec<PersonHit>, String> {
+    let q = query.trim();
+    if q.chars().count() < 2 {
+        return Ok(vec![]);
+    }
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.search_people(q).await
 }
 
 /* ---------------------------------------------------------------- state */

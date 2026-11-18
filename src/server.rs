@@ -186,9 +186,10 @@ async fn api(State(ctx): State<Ctx>, Path(cmd): Path<String>, body: Option<Json<
             None => Err("Which ticket? The id is missing.".into()),
         },
         "edit_comment" => match (id_arg(&args), args.get("commentId").and_then(Value::as_u64)) {
-            (Some(id), Some(c)) => to_json(app::edit_comment(s, id, c, str_arg(&args, "text").unwrap_or_default()).await),
+            (Some(id), Some(c)) => to_json(app::edit_comment(s, id, c, str_arg(&args, "text").unwrap_or_default(), args.get("markdown").and_then(Value::as_bool).unwrap_or(false)).await),
             _ => Err("Which comment? The ticket or comment id is missing.".into()),
         },
+        "search_people" => to_json(app::search_people(s, str_arg(&args, "query").unwrap_or_default()).await),
         _ => return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("Unknown command: {cmd}") }))).into_response(),
     };
     match r {
@@ -322,6 +323,8 @@ mod tests {
         assert!(no_id.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("id is missing"));
         let blank = call("add_comment", json!({ "id": 12, "text": "  " })).await.unwrap();
         assert!(blank.json::<Value>().await.unwrap()["error"].as_str().unwrap().contains("comment"));
+        let short = call("search_people", json!({ "query": "a" })).await.unwrap();
+        assert_eq!(short.json::<Value>().await.unwrap(), json!([]), "one letter: no search");
         let no_cid = call("edit_comment", json!({ "id": 12, "text": "x" })).await.unwrap();
         assert_eq!(no_cid.status(), 400);
         let empty = call("edit_comment", json!({ "id": 12, "commentId": 3, "text": " " })).await.unwrap();
