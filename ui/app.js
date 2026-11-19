@@ -1171,6 +1171,42 @@
     else if (e.target.id === "q" && f.q) { e.preventDefault(); e.target.value = ""; f.q = ""; fOn("q", false); render(); }
     else if (e.target.id === "q" || !e.target.closest?.("input,textarea,select,[contenteditable]")) { if (clearLastFilter()) e.preventDefault(); }
   });
+  /* ---------- drawer width: drag its left edge (or arrow keys on it); remembered ---------- */
+  const DRAWER_MIN = 380;
+  const drawerMax = () => Math.max(DRAWER_MIN, window.innerWidth - 280); // leave some board showing
+  let drawerW = Number(store.get("drawerW", "")) || 0; // 0: the default width
+  function setDrawerW(w, save = true) {
+    drawerW = w ? Math.round(Math.min(Math.max(w, DRAWER_MIN), drawerMax())) : 0;
+    if (drawerW) document.documentElement.style.setProperty("--drawer-w", `${drawerW}px`);
+    else document.documentElement.style.removeProperty("--drawer-w");
+    $("tkResize").setAttribute("aria-valuenow", String(drawerW || $("ticket").offsetWidth || 600));
+    if (save) store.set("drawerW", drawerW ? String(drawerW) : "");
+  }
+  setDrawerW(drawerW, false);
+  window.addEventListener("resize", () => { if (drawerW) setDrawerW(Number(store.get("drawerW", "")) || drawerW, false); });
+  $("tkResize").addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const h = e.currentTarget;
+    h.setPointerCapture(e.pointerId);
+    document.body.classList.add("tk-resizing");
+    const move = (ev) => setDrawerW(window.innerWidth - ev.clientX, false);
+    const done = () => {
+      h.removeEventListener("pointermove", move);
+      document.body.classList.remove("tk-resizing");
+      setDrawerW(drawerW);
+    };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", done, { once: true });
+    h.addEventListener("pointercancel", done, { once: true });
+  });
+  $("tkResize").addEventListener("dblclick", () => setDrawerW(0));
+  $("tkResize").addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+    e.preventDefault();
+    setDrawerW(($("ticket").offsetWidth || 600) + (e.key === "ArrowLeft" ? 1 : -1) * (e.shiftKey ? 120 : 40));
+  });
+
   $("ticket").addEventListener("close", () => {
     document.body.classList.remove("drawer-open");
     markOpen(null);
