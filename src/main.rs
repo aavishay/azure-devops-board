@@ -18,8 +18,25 @@ use tokio::net::TcpListener;
 
 use app::AppState;
 
-/// Folder name for settings and data, shared with the old desktop app so they carry over.
-const IDENT: &str = "azure-devops-board";
+/// Folder name for settings and data, and the name of the board's keychain entries.
+pub(crate) const IDENT: &str = "azure-devops-board";
+/// What releases up to 2.3.11 used instead of `IDENT`, stored reversed. Settings, data and
+/// keychain entries found under it are moved to `IDENT`.
+const LEGACY_IDENT_REVERSED: &str = "draobspoved.xit01ua.moc";
+
+pub(crate) fn legacy_ident() -> String {
+    LEGACY_IDENT_REVERSED.chars().rev().collect()
+}
+
+/// `base/IDENT`, first moving a folder left there by an older release. If the move fails, the
+/// old folder is used as it is.
+fn home_in(base: PathBuf) -> PathBuf {
+    let (new, old) = (base.join(IDENT), base.join(legacy_ident()));
+    if !new.exists() && old.is_dir() && std::fs::rename(&old, &new).is_err() {
+        return old;
+    }
+    new
+}
 /// Tried first, so the address stays the same between runs; any free port if it's taken.
 const DEFAULT_PORT: u16 = 47180;
 
@@ -150,8 +167,8 @@ fn open_browser(url: &str) {
 
 async fn run() -> Result<(), String> {
     let Some(args) = parse_args(std::env::args().skip(1))? else { return Ok(()) };
-    let config_dir = dirs::config_dir().ok_or("Could not find your settings folder.")?.join(IDENT);
-    let data_dir = dirs::data_dir().ok_or("Could not find your data folder.")?.join(IDENT);
+    let config_dir = home_in(dirs::config_dir().ok_or("Could not find your settings folder.")?);
+    let data_dir = home_in(dirs::data_dir().ok_or("Could not find your data folder.")?);
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("Could not create {}: {e}", data_dir.display()))?;
     let lock = startup_lock(&data_dir)?;
     let mut file = ServerFile::load(data_dir.join("server.json"));
@@ -212,6 +229,23 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_folder_moves_to_the_new_name() {
+        assert!(legacy_ident().starts_with("com.") && legacy_ident().ends_with(".devopsboard"));
+        let base = std::env::temp_dir().join(format!("adb-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(legacy_ident())).unwrap();
+        std::fs::write(base.join(legacy_ident()).join("settings.json"), "{}").unwrap();
+        let home = home_in(base.clone());
+        assert_eq!(home, base.join(IDENT));
+        assert!(home.join("settings.json").exists() && !base.join(legacy_ident()).exists(), "moved, not copied");
+        // Once moved (or on a fresh install), nothing else happens.
+        std::fs::create_dir_all(base.join(legacy_ident())).unwrap();
+        assert_eq!(home_in(base.clone()), base.join(IDENT));
+        assert!(base.join(legacy_ident()).exists(), "a newer folder is never replaced");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn parse(a: &[&str]) -> Result<Option<Args>, String> {
         parse_args(a.iter().map(|s| s.to_string()))
