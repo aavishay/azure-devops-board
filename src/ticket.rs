@@ -77,6 +77,8 @@ pub struct Ticket {
     pub history: Vec<HistoryEntry>,
     /// Parts that couldn't be loaded, so the panel can say so instead of showing them empty.
     pub missing: Vec<String>,
+    /// Display names of the people mentioned as `@<id>` in Markdown, by lowercase identity id.
+    pub people: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -204,7 +206,7 @@ impl Ado<'_> {
         let (parent_id, child_ids) = hierarchy(&w["relations"]);
         let linked: Vec<u64> = parent_id.into_iter().chain(child_ids.iter().copied()).collect();
 
-        let (ty, comments, updates, links, me) = tokio::join!(
+        let (ty, comments_v, updates, links, me) = tokio::join!(
             self.call(reqwest::Method::GET, format!("{api}/wit/workitemtypes/{}?api-version=7.1", enc(&kind)), None),
             self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/comments?$top=50&order=desc&{COMMENTS_API}"), None),
             self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/updates?$top=200&api-version=7.1"), None),
@@ -245,7 +247,7 @@ impl Ado<'_> {
             .filter(|(k, _)| has.iter().any(|h| h == k))
             .map(|(k, label)| NumberField { field: k.to_string(), label: label.to_string(), value: f[*k].as_f64() })
             .collect();
-        let comments = match &comments {
+        let comments = match &comments_v {
             Ok(c) => parse_comments(c, me.as_deref()),
             Err(_) => {
                 missing.push("the discussion".into());
@@ -259,6 +261,24 @@ impl Ado<'_> {
                 vec![]
             }
         };
+        let sections: Vec<Section> = SECTIONS
+            .iter()
+            .filter_map(|(k, label)| {
+                let h = f[*k].as_str().filter(|h| !h.trim().is_empty())?;
+                Some(Section { label: label.to_string(), html: h.to_string(), markdown: is_markdown(&w["multilineFieldsFormat"][*k]) })
+            })
+            .collect();
+        let people = self.mentioned(sections.iter().map(|s| s.html.as_str()).chain(comments.iter().map(|c| c.html.as_str())), {
+            // People already on the ticket need no lookup.
+            let objs = ["System.AssignedTo", "System.CreatedBy", "System.ChangedBy"].iter().map(|k| &f[*k]);
+            let list = |r: &'_ Result<Value, String>, k: &str| r.as_ref().ok().and_then(|v| v[k].as_array().cloned()).unwrap_or_default();
+            let (cs, us) = (list(&comments_v, "comments"), list(&updates, "value"));
+            objs.cloned()
+                .chain(cs.iter().flat_map(|c| [c["createdBy"].clone(), c["modifiedBy"].clone()]))
+                .chain(us.iter().map(|u| u["revisedBy"].clone()))
+                .filter_map(|p| known_person(&p))
+                .collect()
+        }).await;
         let (_, assigned_full) = owner_of(&f["System.AssignedTo"]);
         let name = |k: &str| owner_of(&f[k]).1;
         let s = |k: &str| f[k].as_str().map(String::from);
@@ -280,13 +300,7 @@ impl Ado<'_> {
             changed_by: name("System.ChangedBy"),
             changed_at: s("System.ChangedDate"),
             url: self.settings.edit_url(id),
-            sections: SECTIONS
-                .iter()
-                .filter_map(|(k, label)| {
-                    let h = f[*k].as_str().filter(|h| !h.trim().is_empty())?;
-                    Some(Section { label: label.to_string(), html: h.to_string(), markdown: is_markdown(&w["multilineFieldsFormat"][*k]) })
-                })
-                .collect(),
+            sections,
             states: if states.is_empty() { vec![StateInfo { name: state.clone(), category: String::new() }] } else { states },
             parent: parent_id.map(|p| link_of(p, &links)),
             children: child_ids.iter().map(|c| link_of(*c, &links)).collect(),
@@ -295,6 +309,7 @@ impl Ado<'_> {
             comments,
             history,
             missing,
+            people,
         })
     }
 
@@ -353,6 +368,78 @@ impl Ado<'_> {
             .await
             .map(|_| ())
             .map_err(write_error)
+    }
+}
+
+/// Names the board has already looked up, by lowercase identity id, so each person is
+/// looked up once per run.
+static NAMES: std::sync::LazyLock<std::sync::Mutex<BTreeMap<String, String>>> = std::sync::LazyLock::new(Default::default);
+
+/// The identity ids mentioned as `@<id>` (how Markdown stores a mention), lowercase, once each.
+fn mention_ids(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, _) in text.match_indices("@<") {
+        let Some(id) = text.get(i + 2..i + 38) else { continue };
+        let ok = text[i + 38..].starts_with('>')
+            && id.chars().enumerate().all(|(n, c)| if [8, 13, 18, 23].contains(&n) { c == '-' } else { c.is_ascii_hexdigit() });
+        let id = id.to_ascii_lowercase();
+        if ok && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// An identity object's id and display name, such as a comment's author.
+fn known_person(v: &Value) -> Option<(String, String)> {
+    let id = v["id"].as_str().filter(|s| !s.is_empty())?;
+    Some((id.to_ascii_lowercase(), owner_of(v).1?))
+}
+
+/// Display names from an identities lookup, by lowercase id.
+fn identity_names(v: &Value) -> Vec<(String, String)> {
+    v["value"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let id = i["id"].as_str()?.to_ascii_lowercase();
+            let name = ["customDisplayName", "providerDisplayName"].iter().find_map(|k| i[*k].as_str().filter(|s| !s.trim().is_empty()))?;
+            Some((id, owner_of(&Value::String(name.to_string())).1?))
+        })
+        .collect()
+}
+
+impl Ado<'_> {
+    /// Names for everyone mentioned in `texts`: from `known` (people already on the ticket),
+    /// then earlier lookups, then one identities lookup for the rest. A failed lookup only
+    /// leaves those mentions as they are.
+    async fn mentioned<'t>(&self, texts: impl Iterator<Item = &'t str>, known: Vec<(String, String)>) -> BTreeMap<String, String> {
+        let mut ids: Vec<String> = Vec::new();
+        for t in texts {
+            for id in mention_ids(t) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return BTreeMap::new();
+        }
+        let mut names = NAMES.lock().map(|n| n.clone()).unwrap_or_default();
+        names.extend(known);
+        let missing: Vec<&str> = ids.iter().filter(|id| !names.contains_key(*id)).map(String::as_str).collect();
+        if !missing.is_empty() {
+            let url = format!("{}?identityIds={}&api-version=7.1", self.settings.identities_api(), missing.join(","));
+            if let Ok(v) = self.call(reqwest::Method::GET, url, None).await {
+                let found = identity_names(&v);
+                if let Ok(mut cache) = NAMES.lock() {
+                    cache.extend(found.iter().cloned());
+                }
+                names.extend(found);
+            }
+        }
+        ids.into_iter().filter_map(|id| names.get(&id).map(|n| (id, n.clone()))).collect()
     }
 }
 
@@ -673,6 +760,18 @@ mod tests {
     }
 
     #[test]
+    fn mentions() {
+        let a = "a0000000-0000-0000-0000-00000000000a";
+        assert_eq!(mention_ids(&format!("@<{a}> hi @<{}> @<{a}x @<short> @<{a}", a.to_uppercase())), [a], "once each, any case; not unclosed or short ones");
+        assert_eq!(mention_ids("no mentions, just @someone and <b>"), Vec::<String>::new());
+        assert_eq!(mention_ids("é@<A0000000-0000-0000-0000-00000000000A>é"), [a], "any surrounding text");
+        assert_eq!(known_person(&json!({ "id": "ABC", "displayName": "Pat Kim (Contractor)" })), Some(("abc".into(), "Pat Kim".into())));
+        assert_eq!(known_person(&json!({ "displayName": "No Id" })), None);
+        let v = json!({ "value": [{ "id": "X1", "providerDisplayName": "Kim Lee", "customDisplayName": "Kimmy" }, { "id": "X2", "providerDisplayName": " " }, null] });
+        assert_eq!(identity_names(&v), [("x1".to_string(), "Kimmy".to_string())]);
+    }
+
+    #[test]
     fn iteration_tree() {
         let v = json!({ "name": "Fabrikam", "children": [
             { "name": "2026", "children": [
@@ -715,9 +814,9 @@ mod tests {
                 ("GET", p) if p.ends_with("/wit/workitems/7") && u.query().unwrap_or("").contains("System.Rev") => json!({ "id": 7, "rev": 4 }),
                 ("GET", p) if p.ends_with("/wit/workitems/7") => json!({ "id": 7, "rev": 4,
                     "fields": { "System.WorkItemType": "Bug", "System.Title": "Login loops", "System.State": "New", "System.Tags": "web; auth",
-                        "System.AssignedTo": { "displayName": "Sam Roe", "uniqueName": "sam.roe@example.com" },
+                        "System.AssignedTo": { "displayName": "Sam Roe", "uniqueName": "sam.roe@example.com", "id": "a0000000-0000-0000-0000-000000000001" },
                         "Microsoft.VSTS.TCM.ReproSteps": "<p>Sign out, then in</p>", "System.Description": "",
-                        "Microsoft.VSTS.Common.AcceptanceCriteria": "- works\n- **fast**" },
+                        "Microsoft.VSTS.Common.AcceptanceCriteria": "- works\n- **fast**\n\ncc @<A0000000-0000-0000-0000-000000000001> @<B0000000-0000-0000-0000-000000000002> @<C0000000-0000-0000-0000-000000000003> @<nope>" },
                     "multilineFieldsFormat": { "Microsoft.VSTS.Common.AcceptanceCriteria": "markdown" },
                     "relations": [{ "rel": "System.LinkTypes.Hierarchy-Reverse", "url": "http://x/_apis/wit/workItems/10" }] }),
                 ("GET", p) if p.ends_with("/wit/workitemtypes/Bug") => json!({ "states": [{ "name": "New" }, { "name": "Committed" }, { "name": "Done" }],
@@ -729,6 +828,11 @@ mod tests {
                 ("GET", p) if p.ends_with("/wit/tags") => json!({ "value": [{ "name": "web" }, { "name": "Auth" }, { "name": "auth" }, { "name": "observability-q4-2026" }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Areas") => json!({ "name": "Fabrikam", "children": [{ "name": "DevOps", "children": [{ "name": "Infra" }] }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Iterations") => json!({ "name": "Fabrikam", "children": [{ "name": "Sprint 42" }] }),
+                ("GET", p) if p.ends_with("/contoso/_apis/identities") => {
+                    let q = u.query().unwrap_or("");
+                    assert!(q.contains("identityIds=b0000000-0000-0000-0000-000000000002,c0000000-0000-0000-0000-000000000003"), "only people not already on the ticket: {q}");
+                    json!({ "value": [{ "id": "B0000000-0000-0000-0000-000000000002", "providerDisplayName": "Kim Lee (Ops)", "customDisplayName": null }] })
+                }
                 ("GET", p) if p.ends_with("/_apis/connectionData") => json!({ "authenticatedUser": { "id": "me-1", "providerDisplayName": "Alex Doe" } }),
                 ("PATCH", p) if p.ends_with("/comments/2") => {
                     let b: Value = serde_json::from_slice(&body).unwrap();
@@ -788,6 +892,11 @@ mod tests {
         assert_eq!(t.numbers, [NumberField { field: "Microsoft.VSTS.Scheduling.Effort".into(), label: "Effort".into(), value: None }], "only the estimates the type has");
         assert_eq!(t.parent.as_ref().map(|p| (p.id, p.title.as_str())), Some((10, "Auth rework")));
         assert_eq!(t.comments[0].author, "Alex Doe");
+        assert_eq!(
+            t.people.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(),
+            [("a0000000-0000-0000-0000-000000000001", "Sam Roe"), ("b0000000-0000-0000-0000-000000000002", "Kim Lee")],
+            "mentions: one on the ticket, one looked up, one nobody knows"
+        );
         assert_eq!(t.comments.iter().map(|c| (c.id, c.mine)).collect::<Vec<_>>(), [(2, true), (1, false)]);
         ado.edit_comment(7, 2, "Seen it\ntwice", false).await.unwrap();
         assert_eq!(ado.edit_comment(7, 1, "mine now", false).await.unwrap_err(), "Azure DevOps only lets the person who wrote a comment change it.");

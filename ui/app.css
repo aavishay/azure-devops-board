@@ -309,6 +309,7 @@ body.tk-resizing .wrap{transition:none}
 .rich p,.rich ul,.rich ol,.rich pre,.rich blockquote,.rich table{margin:0 0 8px}
 .rich .rh{font-weight:600;margin:8px 0 4px}
 .rich pre,.rich code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.rich .mention{color:var(--accent);font-weight:500}
 .rich pre{background:var(--bg);border:1px solid var(--line);border-radius:var(--r);padding:8px;white-space:pre;overflow-x:auto}
 .rich blockquote{border-left:3px solid var(--line);padding-left:10px;color:var(--muted)}
 .rich table{border-collapse:collapse}
