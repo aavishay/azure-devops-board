@@ -1,5 +1,5 @@
 //! One ticket in full, for the ticket panel: fields, rich text, links, discussion and
-//! history, plus the quick edits (state, assignee, priority, estimates, area, iteration) and comments.
+//! history, plus the quick edits (state, assignee, priority, estimates, area, iteration, tags) and comments.
 
 use std::collections::BTreeMap;
 
@@ -25,7 +25,9 @@ const TRACKED: &[(&str, &str)] = &[
     ("Microsoft.VSTS.Scheduling.Effort", "Effort"),
     ("Microsoft.VSTS.Scheduling.StoryPoints", "Story points"),
     ("Microsoft.VSTS.Scheduling.RemainingWork", "Remaining work"),
+    ("System.AreaPath", "Area"),
     ("System.IterationPath", "Iteration"),
+    ("System.Tags", "Tags"),
     ("System.Title", "Title"),
 ];
 
@@ -183,6 +185,9 @@ pub struct TicketEdit {
     /// A new area path, such as `Fabrikam\DevOps`.
     #[serde(default)]
     pub area: Option<String>,
+    /// The ticket's full new set of tags; empty removes them all.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 pub const STALE: &str = "Someone changed this ticket since you opened it, so nothing was saved. It now shows the latest; make your change again.";
@@ -370,6 +375,15 @@ impl Ado<'_> {
         Ok(class_nodes(&v))
     }
 
+    /// The tags already used in the project, to suggest when tagging a ticket.
+    pub async fn tags(&self) -> Result<Vec<String>, String> {
+        let v = self.call(reqwest::Method::GET, format!("{}/wit/tags?api-version=7.1-preview.1", self.settings.project_api()), None).await?;
+        let mut out: Vec<String> = v["value"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+        out.sort_by_key(|s| s.to_lowercase());
+        out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        Ok(out)
+    }
+
     /// Every area path in the project, the project itself (the root) first, in tree order.
     pub async fn areas(&self) -> Result<Vec<String>, String> {
         let v = self.call(reqwest::Method::GET, format!("{}/wit/classificationnodes/Areas?$depth=20&api-version=7.1", self.settings.project_api()), None).await?;
@@ -533,6 +547,9 @@ fn edit_ops(e: &TicketEdit) -> Result<Vec<Value>, String> {
     if let Some(a) = e.area.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         ops.push(json!({ "op": "add", "path": "/fields/System.AreaPath", "value": a }));
     }
+    if let Some(tags) = &e.tags {
+        ops.push(json!({ "op": "add", "path": "/fields/System.Tags", "value": join_tags(tags)? }));
+    }
     for (field, value) in &e.numbers {
         let Some((_, label)) = NUMBERS.iter().find(|(k, _)| k == field) else {
             return Err(format!("The board can't change the field {field}."));
@@ -544,6 +561,23 @@ fn edit_ops(e: &TicketEdit) -> Result<Vec<Value>, String> {
         }
     }
     Ok(ops)
+}
+
+/// Tags as Azure DevOps stores them, "a; b", without blanks or repeats (any case).
+fn join_tags(tags: &[String]) -> Result<String, String> {
+    let mut out: Vec<&str> = Vec::new();
+    for t in tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        if t.contains([';', ',']) {
+            return Err(format!("A tag can't contain ; or , (\"{t}\"). Add it as separate tags."));
+        }
+        if t.chars().count() > 400 {
+            return Err("A tag can be at most 400 characters long.".into());
+        }
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+            out.push(t);
+        }
+    }
+    Ok(out.join("; "))
 }
 
 #[cfg(test)]
@@ -591,7 +625,7 @@ mod tests {
 
     #[test]
     fn edit_patch() {
-        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new(), iteration: None, area: None };
+        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
         let ops = edit_ops(&e).unwrap();
         assert_eq!(ops[0], json!({ "op": "test", "path": "/rev", "value": 7 }));
         assert_eq!(ops[1], json!({ "op": "add", "path": "/fields/System.State", "value": "Done" }));
@@ -613,6 +647,10 @@ mod tests {
         let area = TicketEdit { area: Some("Fabrikam\\Platform".into()), ..none.clone() };
         assert_eq!(edit_ops(&area).unwrap()[1], json!({ "op": "add", "path": "/fields/System.AreaPath", "value": "Fabrikam\\Platform" }));
         assert_eq!(edit_ops(&TicketEdit { area: Some(String::new()), ..none.clone() }).unwrap().len(), 1, "a blank area isn't sent");
+        let tags = |t: &[&str]| TicketEdit { tags: Some(t.iter().map(|s| s.to_string()).collect()), ..none.clone() };
+        assert_eq!(edit_ops(&tags(&["web", " auth ", "", "Web"])).unwrap()[1], json!({ "op": "add", "path": "/fields/System.Tags", "value": "web; auth" }));
+        assert_eq!(edit_ops(&tags(&[])).unwrap()[1]["value"], "", "no tags left: the field is emptied");
+        assert!(edit_ops(&tags(&["a;b"])).unwrap_err().contains("separate tags"));
     }
 
     #[test]
@@ -669,6 +707,7 @@ mod tests {
                     { "id": 2, "createdBy": { "displayName": "Alex Doe", "id": "me-1" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" },
                     { "id": 1, "createdBy": { "displayName": "Sam Roe", "id": "other-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "<div>Found it</div>" },
                 ] }),
+                ("GET", p) if p.ends_with("/wit/tags") => json!({ "value": [{ "name": "web" }, { "name": "Auth" }, { "name": "auth" }, { "name": "observability-q4-2026" }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Areas") => json!({ "name": "Fabrikam", "children": [{ "name": "DevOps", "children": [{ "name": "Infra" }] }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Iterations") => json!({ "name": "Fabrikam", "children": [{ "name": "Sprint 42" }] }),
                 ("GET", p) if p.ends_with("/_apis/connectionData") => json!({ "authenticatedUser": { "id": "me-1", "providerDisplayName": "Alex Doe" } }),
@@ -739,8 +778,9 @@ mod tests {
         assert!(t.missing.is_empty(), "{:?}", t.missing);
         assert_eq!(ado.iterations().await.unwrap().iter().map(|i| i.path.as_str()).collect::<Vec<_>>(), ["Fabrikam", "Fabrikam\\Sprint 42"]);
         assert_eq!(ado.areas().await.unwrap(), ["Fabrikam", "Fabrikam\\DevOps", "Fabrikam\\DevOps\\Infra"]);
+        assert_eq!(ado.tags().await.unwrap(), ["Auth", "observability-q4-2026", "web"]);
 
-        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new(), iteration: None, area: None };
+        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
         ado.edit(&edit(4, "Done")).await.unwrap();
         assert_eq!(ado.edit(&edit(3, "Done")).await.unwrap_err(), STALE);
         let rule = ado.edit(&edit(4, "Bogus")).await.unwrap_err();
