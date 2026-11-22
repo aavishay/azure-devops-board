@@ -135,6 +135,16 @@ impl Settings {
         format!("{}/{}", self.ado_url, enc(&self.org))
     }
 
+    /// Where identities are looked up: a separate host on Azure DevOps Services, the
+    /// collection itself on Azure DevOps Server.
+    pub fn identities_api(&self) -> String {
+        if self.ado_url.eq_ignore_ascii_case("https://dev.azure.com") {
+            format!("https://vssps.dev.azure.com/{}/_apis/identities", enc(&self.org))
+        } else {
+            format!("{}/_apis/identities", self.org_url())
+        }
+    }
+
     pub fn project_api(&self) -> String {
         format!("{}/{}/_apis", self.org_url(), enc(&self.project))
     }
