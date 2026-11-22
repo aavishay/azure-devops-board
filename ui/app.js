@@ -745,7 +745,8 @@
         if (n.nodeType === Node.TEXT_NODE) { to.append(n.textContent); continue; }
         if (n.nodeType !== Node.ELEMENT_NODE || DROP.has(n.tagName)) continue;
         const tag = n.tagName;
-        if (tag === "A") { const href = webUrl(n.getAttribute("href")); if (href) to.append(link(href, (a) => walk(n, a))); else walk(n, to); }
+        if (tag === "A" && n.hasAttribute("data-vss-mention")) { const m = document.createElement("span"); m.className = "mention"; m.textContent = n.textContent; to.append(m); }
+        else if (tag === "A") { const href = webUrl(n.getAttribute("href")); if (href) to.append(link(href, (a) => walk(n, a))); else walk(n, to); }
         else if (tag === "IMG") { const href = webUrl(n.getAttribute("src")); if (href) to.append(link(href, (a) => { a.textContent = `[image${n.alt ? ": " + n.alt : ""}]`; })); }
         else if (/^H[1-6]$/.test(tag)) { const d = document.createElement("div"); d.className = "rh"; walk(n, d); to.append(d); }
         else if (RICH.has(tag)) {
@@ -850,7 +851,40 @@
   }
   // A field or comment as cleaned DOM nodes, rendering Markdown where there is some.
   function richText(text, markdown) {
-    return rich(markdown ? md(text) : looksLikeMarkdown(text) ? md(commentText(text, true)) : text);
+    return mentions(rich(markdown ? md(text) : looksLikeMarkdown(text) ? md(commentText(text, true)) : text));
+  }
+  // Markdown keeps a mention as @<identity id>; show the person's name instead (code is left alone).
+  const MENTION = /@<([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})>/gi;
+  const personOf = (id) => TK?.people?.[id.toLowerCase()];
+  function mentions(frag) {
+    const walk = document.createTreeWalker(frag, NodeFilter.SHOW_TEXT);
+    const hits = [];
+    for (let n; (n = walk.nextNode());) if (n.data.search(MENTION) >= 0 && !n.parentElement?.closest("code,pre")) hits.push(n);
+    for (const n of hits) {
+      const parts = [];
+      let last = 0;
+      for (const m of n.data.matchAll(MENTION)) {
+        const name = personOf(m[1]);
+        if (!name) continue; // unknown person: leave it as written
+        parts.push(n.data.slice(last, m.index));
+        const el = document.createElement("span"); el.className = "mention"; el.textContent = `@${name}`;
+        parts.push(el);
+        last = m.index + m[0].length;
+      }
+      if (parts.length) n.replaceWith(...parts, n.data.slice(last));
+    }
+    return frag;
+  }
+  // Editing Markdown shows "@Name" for a mention and turns it back into @<id> on save.
+  const namesIn = (text) => String(text).replace(MENTION, (m, id) => (personOf(id) ? `@${personOf(id)}` : m));
+  function idsIn(text) {
+    const people = Object.entries(TK?.people || {}).sort((a, b) => b[1].length - a[1].length); // "Sam Roe" before "Sam"
+    let out = String(text);
+    for (const [id, name] of people) {
+      const at = new RegExp(`@${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_])`, "gu");
+      out = out.replace(at, `@<${id.toUpperCase()}>`);
+    }
+    return out;
   }
 
   let TK = null;           // the ticket on show
@@ -1104,7 +1138,7 @@
       ${!c.markdown && commentHasMarkup(c.html) ? `<p class="hint">Saving here keeps the text only: this comment's formatting, links or mentions will be removed. To keep them, edit it in Azure DevOps.</p>` : ""}
       <div class="tk-c-actions"><button class="btn primary" type="button" data-tk="save-comment">Save</button><button class="linkbtn" type="button" data-tk="cancel-comment">Cancel</button></div>`;
     const ta = box.querySelector("textarea");
-    ta.value = ta.defaultValue = c.markdown ? c.html : commentText(c.html, looksLikeMarkdown(c.html));
+    ta.value = ta.defaultValue = c.markdown ? namesIn(c.html) : commentText(c.html, looksLikeMarkdown(c.html));
     li.querySelector(".rich").hidden = true;
     li.querySelector(".tk-c-editbtn").hidden = true;
     li.append(box);
@@ -1123,7 +1157,7 @@
     showErr("tkErr", "");
     try {
       const c = TK.comments.find((x) => String(x.id) === li.dataset.comment);
-      tkRerender(await invoke("edit_comment", { id: TK.id, commentId: Number(li.dataset.comment), text, markdown: !!c?.markdown }), "Comment updated.");
+      tkRerender(await invoke("edit_comment", { id: TK.id, commentId: Number(li.dataset.comment), text: c?.markdown ? idsIn(text) : text, markdown: !!c?.markdown }), "Comment updated.");
     } catch (e) {
       showErr("tkErr", String(e?.message || e));
       btn.disabled = false; btn.textContent = "Save";
