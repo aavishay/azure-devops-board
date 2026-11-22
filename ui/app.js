@@ -492,6 +492,8 @@
   // Markup: a text box the user types in, a hidden input holding the chosen value
   // ("" is Unassigned for people), and the suggestion list. initPicker() wires it up
   // with a source of choices: {list(), remote?(q), cache?, free?(text), empty?, ready?}.
+  // With `pick(value)` the picker adds to a list instead of holding a value: choosing
+  // hands the value over and empties the box, and only an exact name counts as a match.
   let pickN = 0;
   const pickerHtml = (hidden, value, label, placeholder = "Unassigned · type a name or email") => {
     const id = `pick${++pickN}`;
@@ -525,6 +527,7 @@
     const paint = () => {
       const q = input.value.trim() === label ? "" : input.value.trim();
       shown = candidates(q).slice(0, 60);
+      if (src.pick && q && src.free?.(q) && !shown.some((x) => norm(x.value) === norm(q))) shown.push({ value: q, label: q, note: "new tag" });
       if (!shown.length) {
         const msg = src.failed ? src.failed : src.loading ? "Loading…" : !src.remote || q.length < 2 ? "No match" : src.cache.has(norm(q)) ? src.none : "Searching…";
         list.innerHTML = `<li class="pick-none">${esc(msg)}</li>`;
@@ -534,6 +537,7 @@
       if (active >= 0) { input.setAttribute("aria-activedescendant", `${list.id}-${active}`); list.querySelector(".on")?.scrollIntoView({ block: "nearest" }); }
     };
     const choose = (x) => {
+      if (src.pick) { if (x.value) src.pick(x.value); input.value = label = ""; active = -1; return paint(); }
       label = x.value ? x.label : "";
       input.value = label;
       if (hidden.value !== x.value) { hidden.value = x.value; hidden.dispatchEvent(new Event("change", { bubbles: true })); }
@@ -545,7 +549,7 @@
       if (t === label) return;
       if (!t) { if (src.empty) choose({ value: "", label: "" }); else input.value = label; return; }
       const found = candidates(t).filter((x) => x.value);
-      const hit = found.find((x) => norm(x.label) === norm(t) || norm(x.value) === norm(t)) || (found.length === 1 ? found[0] : null);
+      const hit = found.find((x) => norm(x.label) === norm(t) || norm(x.value) === norm(t)) || (found.length === 1 && !src.pick ? found[0] : null);
       if (hit) return choose(hit);
       if (src.free?.(t)) return choose({ value: t, label: t });
       input.value = label; // nothing matches: keep what was there
@@ -562,7 +566,15 @@
       input.select(); active = -1; paint();
       src.ready?.then(() => { if (document.activeElement === input) paint(); });
     });
-    input.addEventListener("input", () => { active = -1; paint(); search(input.value.trim()); });
+    input.addEventListener("input", () => {
+      // Adding to a list: a comma or semicolon (typed or pasted) ends each entry.
+      if (src.pick && /[;,]/.test(input.value)) {
+        const parts = input.value.split(/[;,]/);
+        input.value = parts.pop();
+        for (const v of parts.map((x) => x.trim()).filter(Boolean)) src.pick(v);
+      }
+      active = -1; paint(); search(input.value.trim());
+    });
     input.addEventListener("blur", () => { settle(); close(); });
     input.addEventListener("keydown", (e) => {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -575,6 +587,10 @@
         else { if (!list.hidden) e.preventDefault(); settle(); close(); }
       } else if (e.key === "Escape" && !list.hidden) {
         e.preventDefault(); e.stopPropagation(); input.value = label; close();
+      } else if (src.pick && (e.key === "," || e.key === ";")) {
+        e.preventDefault(); settle();
+      } else if (src.pick && e.key === "Backspace" && !input.value && src.unpick) {
+        e.preventDefault(); src.unpick(); paint();
       }
     });
     list.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus in the box
@@ -608,6 +624,20 @@
   // in tree order, past sprints latest first). Areas: in tree order.
   const iterSource = (cur) => nodeSource("iterations", cur, (i) => ({ value: i.path, label: i.path, note: iterNote(i) }));
   const areaSource = (cur) => nodeSource("areas", cur, (a) => ({ value: a, label: a, note: BOARD?.areaPath && onBoard(a) ? "on this board" : "" }));
+  // Tags: the project's, plus any on the board, minus the ticket's own; new ones allowed.
+  const tagSource = () => {
+    const src = nodeSource("tags", "", (n) => ({ value: n, label: n }));
+    const project = src.list;
+    src.list = () => {
+      const seen = new Set(tkTags.map(norm)), out = [];
+      for (const g of [...project().map((x) => x.value), ...ALL.flatMap((t) => t.tags || [])]) if (!seen.has(norm(g))) { seen.add(norm(g)); out.push({ value: g, label: g }); }
+      return out.sort((a, b) => a.label.localeCompare(b.label));
+    };
+    src.free = (t) => !/[;,]/.test(t);
+    src.pick = (g) => tkSetTags([...tkTags, g]);
+    src.unpick = () => tkSetTags(tkTags.slice(0, -1));
+    return src;
+  };
   // The board shows its area path and everything under it.
   const onBoard = (a) => { const b = norm(BOARD?.areaPath); return !b || norm(a) === b || norm(a).startsWith(`${b}\\`); };
   const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
@@ -887,7 +917,6 @@
     const prio = [1, 2, 3, 4].map((p) => `<option value="${p}"${p === t.priority ? " selected" : ""}>${p}</option>`).join("");
     const when = (at) => (at ? esc(fmt(at)) : "");
     const meta = [
-      ...(t.tags.length ? [["Tags", t.tags.map((g) => `<span class="tag">${esc(g)}</span>`).join(" ")]] : []),
       ["Created", `${esc(t.createdBy || "")}${t.createdAt ? " · " + when(t.createdAt) : ""}`],
       ["Changed", `${esc(t.changedBy || "")}${t.changedAt ? " · " + when(t.changedAt) : ""}`],
     ];
@@ -909,6 +938,7 @@
         <label class="iter">Iteration${pickerHtml(`data-f="iteration"`, t.iteration, t.iteration, "Type a sprint name")}</label>
         ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
         ${t.numbers.map((n) => `<label class="num">${esc(n.label)}<input type="number" min="0" step="any" inputmode="decimal" data-n="${esc(n.field)}" value="${n.value ?? ""}" placeholder="—"></label>`).join("")}
+        <div class="tk-tags"><span class="lbl" id="tkTagsLbl">Tags</span><div class="tk-taglist" id="tkTagList"></div>${pickerHtml(`data-tagin aria-hidden="true"`, "", "", "Add a tag")}</div>
         <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
       </div>
       <p class="hint" id="tkAreaHint" role="status" hidden></p>
@@ -941,11 +971,25 @@
     }
     initPicker($("tk").querySelector(".who .pick"), peopleSource(t.assignedTo));
     initPicker($("tk").querySelector(".area .pick"), areaSource(t.area));
+    initPicker($("tk").querySelector(".tk-tags .pick"), tagSource());
+    $("tk").querySelector(".tk-tags .pick-in").setAttribute("aria-labelledby", "tkTagsLbl");
+    tkSetTags(t.tags, false);
     initPicker($("tk").querySelector(".iter .pick"), iterSource(t.iteration));
     $("ticket").setAttribute("aria-labelledby", "tkTitle");
   }
 
   const tkField = (f) => $("tk").querySelector(`[data-f="${f}"]`);
+  // The tags as edited in the panel; saved as the ticket's whole new set.
+  let tkTags = [];
+  function tkSetTags(tags, dirty = true) {
+    const out = [];
+    for (const g of tags.map((x) => String(x).trim()).filter(Boolean)) if (!out.some((o) => norm(o) === norm(g))) out.push(g);
+    tkTags = out;
+    $("tkTagList").innerHTML = out.map((g, i) => `<span class="tag">${esc(g)}<button type="button" class="tag-x" data-tk="untag" data-i="${i}" aria-label="Remove tag ${esc(g)}">×</button></span>`).join("")
+      || `<span class="muted">No tags</span>`;
+    if (dirty) tkDirty();
+  }
+  const sameTags = (a, b) => a.length === b.length && a.every((g) => b.some((h) => norm(h) === norm(g)));
   function tkChanges() {
     if (!TK || TK.loading) return {};
     const out = {};
@@ -953,6 +997,7 @@
     if (st && st !== TK.state) out.state = st;
     const who = tkField("assignedTo");
     if (who && who.value !== who.dataset.was) out.assignedTo = who.value; // hidden inputs have no separate default
+    if (!sameTags(tkTags, TK.tags || [])) out.tags = tkTags;
     const ar = tkField("area");
     if (ar && ar.value && ar.value !== ar.dataset.was) out.area = ar.value;
     const it = tkField("iteration");
@@ -1005,8 +1050,9 @@
 
   // Re-render the panel with a fresh ticket, keeping quick edits the user hasn't saved yet.
   function tkRerender(t, note) {
-    const { numbers = {}, ...fields } = tkChanges();
+    const { numbers = {}, tags, ...fields } = tkChanges();
     renderTicket(t, note);
+    if (tags) tkSetTags(tags, false);
     for (const [k, v] of Object.entries(fields)) { const el = tkField(k); if (el?.closest(".pick")) el.closest(".pick").pickSet(String(v)); else if (el) el.value = String(v); }
     for (const [k, v] of Object.entries(numbers)) { const el = $("tk").querySelector(`[data-n="${CSS.escape(k)}"]`); if (el) el.value = v ?? ""; }
     tkDirty();
@@ -1241,6 +1287,7 @@
     if (what === "close") closeTicket();
     else if (what === "back") tkGo(-1);
     else if (what === "fwd") tkGo(1);
+    else if (what === "untag") { tkSetTags(tkTags.filter((_, i) => i !== Number(b.dataset.i))); $("tk").querySelector(".tk-tags .pick-in").focus(); }
     else if (what === "save") tkSave();
     else if (what === "discard") renderTicket(TK);
     else if (what === "comment") tkComment();
