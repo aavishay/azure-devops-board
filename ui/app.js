@@ -587,22 +587,29 @@
 
   // Iterations: loaded once, listed current sprint first, then the coming ones, then the
   // rest (undated ones in tree order, past sprints latest first).
-  let ITERS = null, iterLoad = null;
-  const iterSource = (cur) => {
+  // Area and iteration paths: each list is loaded once, the first time a picker needs it.
+  const NODES = {}, NODE_LOAD = {};
+  function nodeSource(cmd, cur, shape) {
     const src = {
       list: () => {
-        const all = (ITERS || []).map((i) => ({ value: i.path, label: i.path, note: iterNote(i) }));
+        const all = (NODES[cmd] || []).map(shape);
         if (cur && !all.some((x) => x.value === cur)) all.unshift({ value: cur, label: cur, note: "" });
         return all;
       },
-      loading: !ITERS,
+      loading: !NODES[cmd],
     };
-    if (!ITERS) {
-      src.ready = (iterLoad ||= invoke("iterations").then((v) => { ITERS = sortIters(v); }).finally(() => { iterLoad = null; }))
-        .then(() => { src.loading = false; }, (e) => { src.loading = false; src.failed = `Couldn't load the iterations: ${e?.message || e}`; });
+    if (!NODES[cmd]) {
+      src.ready = (NODE_LOAD[cmd] ||= invoke(cmd).then((v) => { NODES[cmd] = cmd === "iterations" ? sortIters(v) : v; }).finally(() => { delete NODE_LOAD[cmd]; }))
+        .then(() => { src.loading = false; }, (e) => { src.loading = false; src.failed = `Couldn't load the ${cmd}: ${e?.message || e}`; });
     }
     return src;
-  };
+  }
+  // Iterations: current sprint first, then the coming ones, then the rest (undated ones
+  // in tree order, past sprints latest first). Areas: in tree order.
+  const iterSource = (cur) => nodeSource("iterations", cur, (i) => ({ value: i.path, label: i.path, note: iterNote(i) }));
+  const areaSource = (cur) => nodeSource("areas", cur, (a) => ({ value: a, label: a, note: BOARD?.areaPath && onBoard(a) ? "on this board" : "" }));
+  // The board shows its area path and everything under it.
+  const onBoard = (a) => { const b = norm(BOARD?.areaPath); return !b || norm(a) === b || norm(a).startsWith(`${b}\\`); };
   const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
   const day = (d) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
   function iterNote(i) {
@@ -880,7 +887,6 @@
     const prio = [1, 2, 3, 4].map((p) => `<option value="${p}"${p === t.priority ? " selected" : ""}>${p}</option>`).join("");
     const when = (at) => (at ? esc(fmt(at)) : "");
     const meta = [
-      ["Area", esc(t.area)],
       ...(t.tags.length ? [["Tags", t.tags.map((g) => `<span class="tag">${esc(g)}</span>`).join(" ")]] : []),
       ["Created", `${esc(t.createdBy || "")}${t.createdAt ? " · " + when(t.createdAt) : ""}`],
       ["Changed", `${esc(t.changedBy || "")}${t.changedAt ? " · " + when(t.changedAt) : ""}`],
@@ -899,11 +905,13 @@
       <div class="tk-edit">
         <label>State<select data-f="state">${states}</select></label>
         <label class="who">Assigned to${pickerHtml(`data-f="assignedTo"`, curWho, t.assignedTo?.name || "")}</label>
+        <label class="area">Area${pickerHtml(`data-f="area"`, t.area, t.area, "Type an area name")}</label>
         <label class="iter">Iteration${pickerHtml(`data-f="iteration"`, t.iteration, t.iteration, "Type a sprint name")}</label>
         ${t.hasPriority ? `<label>Priority<select data-f="priority">${t.priority == null ? `<option value="" selected>—</option>` : ""}${prio}</select></label>` : ""}
         ${t.numbers.map((n) => `<label class="num">${esc(n.label)}<input type="number" min="0" step="any" inputmode="decimal" data-n="${esc(n.field)}" value="${n.value ?? ""}" placeholder="—"></label>`).join("")}
         <div class="tk-save" hidden><button class="btn primary" type="button" data-tk="save">Save changes</button><button class="linkbtn" type="button" data-tk="discard">Discard</button></div>
       </div>
+      <p class="hint" id="tkAreaHint" role="status" hidden></p>
       <p class="err" id="tkErr" role="alert" hidden></p>
       ${note ? `<p class="tk-note" role="status">${esc(note)}</p>` : ""}
       ${t.missing.length ? `<p class="hint">Couldn't load ${esc(t.missing.join(", "))} from Azure DevOps.</p>` : ""}
@@ -932,6 +940,7 @@
       li.append(d); cl.append(li);
     }
     initPicker($("tk").querySelector(".who .pick"), peopleSource(t.assignedTo));
+    initPicker($("tk").querySelector(".area .pick"), areaSource(t.area));
     initPicker($("tk").querySelector(".iter .pick"), iterSource(t.iteration));
     $("ticket").setAttribute("aria-labelledby", "tkTitle");
   }
@@ -944,6 +953,8 @@
     if (st && st !== TK.state) out.state = st;
     const who = tkField("assignedTo");
     if (who && who.value !== who.dataset.was) out.assignedTo = who.value; // hidden inputs have no separate default
+    const ar = tkField("area");
+    if (ar && ar.value && ar.value !== ar.dataset.was) out.area = ar.value;
     const it = tkField("iteration");
     if (it && it.value && it.value !== it.dataset.was) out.iteration = it.value;
     const p = tkField("priority");
@@ -959,7 +970,17 @@
     if (Object.keys(nums).length) out.numbers = nums;
     return out;
   }
-  function tkDirty() { $("tk").querySelector(".tk-save").hidden = !Object.keys(tkChanges()).length; }
+  function tkDirty() {
+    const ch = tkChanges();
+    $("tk").querySelector(".tk-save").hidden = !Object.keys(ch).length;
+    // Moving a ticket to an area outside the board takes it off the board.
+    const hint = $("tkAreaHint");
+    if (hint) {
+      const off = !!ch.area && !onBoard(ch.area);
+      hint.hidden = !off;
+      hint.textContent = off ? `After saving, #${TK.id} leaves this board, which shows ${BOARD.areaPath} and the areas under it.` : "";
+    }
+  }
 
   async function tkSave() {
     const changes = tkChanges();
