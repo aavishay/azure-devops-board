@@ -109,9 +109,9 @@ The token is kept in `server.json` (readable only by you), so an open tab keeps 
 
 | What | Where |
 |---|---|
-| Settings | `settings.json` in the config folder: `%APPDATA%\com.au10tix.devopsboard` (Windows), `~/Library/Application Support/com.au10tix.devopsboard` (macOS), `~/.config/com.au10tix.devopsboard` (Linux) |
+| Settings | `settings.json` in the config folder: `%APPDATA%\azure-devops-board` (Windows), `~/Library/Application Support/azure-devops-board` (macOS), `~/.config/azure-devops-board` (Linux) |
 | PAT / refresh token | OS credential store: Windows Credential Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring / KWallet). If no keyring is running on Linux, it falls back to `credentials.fallback.json` with `0600` permissions. |
-| Board snapshot + change log | `board/` in the data folder (the same as the config folder on Windows and macOS, `~/.local/share/com.au10tix.devopsboard` on Linux) |
+| Board snapshot + change log | `board/` in the data folder (the same as the config folder on Windows and macOS, `~/.local/share/azure-devops-board` on Linux) |
 | Server port and browser token | `server.json` (and its `server.lock`) in the data folder |
 
 **Sign out** removes the saved credentials from this computer.

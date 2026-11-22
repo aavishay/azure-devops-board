@@ -2,7 +2,7 @@
 name = "azure-devops-board"
 version = "2.3.11"
 description = "DevOps Team Board: an Azure DevOps kanban that runs in your browser"
-authors = ["AU10TIX DevOps"]
+authors = ["Azure DevOps Board contributors"]
 edition = "2021"
 rust-version = "1.89"
 # The UI is embedded from ui/ at build time.
