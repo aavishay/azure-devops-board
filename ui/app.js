@@ -930,7 +930,7 @@
         <a class="btn" href="${esc(t.url)}" target="_blank" rel="noopener">Open in Azure DevOps ↗</a>
         <button class="btn icon" type="button" data-tk="close" aria-label="Close">×</button>
       </div>
-      <h2 class="tk-title" id="tkTitle">${esc(t.title)}</h2>
+      <h2 class="tk-title" id="tkTitle"><textarea class="tk-title-in" data-f="title" rows="1" maxlength="255" aria-label="Title" title="Edit the title; Enter saves, Esc undoes">${esc(t.title)}</textarea></h2>
       <div class="tk-edit">
         <label>State<select data-f="state">${states}</select></label>
         <label class="who">Assigned to${pickerHtml(`data-f="assignedTo"`, curWho, t.assignedTo?.name || "")}</label>
@@ -976,7 +976,17 @@
     tkSetTags(t.tags, false);
     initPicker($("tk").querySelector(".iter .pick"), iterSource(t.iteration));
     $("ticket").setAttribute("aria-labelledby", "tkTitle");
+    tkFitTitle();
   }
+
+  // The title box grows with its text, so a long title wraps like the heading it replaces.
+  function tkFitTitle() {
+    const el = $("ticket").open && tkField("title");
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
+  const oneLine = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
   const tkField = (f) => $("tk").querySelector(`[data-f="${f}"]`);
   // The tags as edited in the panel; saved as the ticket's whole new set.
@@ -993,6 +1003,8 @@
   function tkChanges() {
     if (!TK || TK.loading) return {};
     const out = {};
+    const ti = oneLine(tkField("title")?.value);
+    if (ti && ti !== oneLine(TK.title)) out.title = ti; // a blank title isn't a change; blur puts it back
     const st = tkField("state")?.value;
     if (st && st !== TK.state) out.state = st;
     const who = tkField("assignedTo");
@@ -1017,6 +1029,7 @@
   }
   function tkDirty() {
     const ch = tkChanges();
+    tkFitTitle();
     $("tk").querySelector(".tk-save").hidden = !Object.keys(ch).length;
     // Moving a ticket to an area outside the board takes it off the board.
     const hint = $("tkAreaHint");
@@ -1248,9 +1261,10 @@
     else document.documentElement.style.removeProperty("--drawer-w");
     $("tkResize").setAttribute("aria-valuenow", String(drawerW || $("ticket").offsetWidth || 600));
     if (save) store.set("drawerW", drawerW ? String(drawerW) : "");
+    tkFitTitle();
   }
   setDrawerW(drawerW, false);
-  window.addEventListener("resize", () => { if (drawerW) setDrawerW(Number(store.get("drawerW", "")) || drawerW, false); });
+  window.addEventListener("resize", () => { if (drawerW) setDrawerW(Number(store.get("drawerW", "")) || drawerW, false); else tkFitTitle(); });
   $("tkResize").addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -1296,12 +1310,21 @@
     else if (what === "save-comment") tkSaveComment(b.closest("li"));
   });
   $("tk").addEventListener("change", (e) => { if (e.target.matches("[data-f],[data-n]")) tkDirty(); });
-  $("tk").addEventListener("input", (e) => { if (e.target.matches("[data-n]")) tkDirty(); });
+  $("tk").addEventListener("input", (e) => {
+    if (e.target.matches('[data-f="title"]') && /[\r\n]/.test(e.target.value)) e.target.value = e.target.value.replace(/\s*[\r\n]+\s*/g, " "); // pasted lines
+    if (e.target.matches('[data-n],[data-f="title"]')) tkDirty();
+  });
+  $("tk").addEventListener("focusout", (e) => {
+    if (e.target.matches('[data-f="title"]') && !oneLine(e.target.value)) { e.target.value = TK?.title || ""; tkDirty(); }
+  });
   $("tk").addEventListener("keydown", (e) => {
     if (e.target.id === "tkComment" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkComment(); }
     else if (e.target.closest(".tk-c-edit") && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); tkSaveComment(e.target.closest("li")); }
     else if (e.target.closest(".tk-c-edit") && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); tkCancelComment(e.target.closest("li")); }
     else if (e.target.matches("[data-n]") && e.key === "Enter") { e.preventDefault(); tkSave(); }
+    else if (e.target.matches('[data-f="title"]') && e.key === "Enter" && !e.isComposing) { e.preventDefault(); tkSave(); }
+    // Esc undoes a title edit; with nothing to undo it closes the panel as usual.
+    else if (e.target.matches('[data-f="title"]') && e.key === "Escape" && e.target.value !== TK?.title) { e.preventDefault(); e.stopPropagation(); e.target.value = TK?.title || ""; tkDirty(); }
   });
   window.addEventListener("focus", () => { if (AUTH?.signedIn && nextAutoAt && Date.now() > nextAutoAt) refresh("auto"); });
 
