@@ -387,6 +387,12 @@ pub async fn areas(state: &AppState) -> Result<Vec<String>, String> {
     Ado { http: &state.http, settings: &s, auth }.areas().await
 }
 
+/// Tags already used in the project, to suggest when tagging a ticket.
+pub async fn tags(state: &AppState) -> Result<Vec<String>, String> {
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.tags().await
+}
+
 /* ---------------------------------------------------------------- state */
 
 impl AppState {
