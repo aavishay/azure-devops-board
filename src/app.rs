@@ -50,6 +50,8 @@ pub struct AuthStatus {
 pub struct BoardPayload {
     title: String,
     subtitle: String,
+    /// The area the board shows (with its sub-areas), to warn when a ticket moves out of it.
+    area_path: String,
     board_url: String,
     time_zone: String,
     lookback_days: u32,
@@ -241,6 +243,7 @@ pub async fn load_board(state: &AppState) -> Result<BoardPayload, String> {
     Ok(BoardPayload {
         title: s.title.clone(),
         subtitle: format!("{} › {} · Azure Boards", s.org, s.area_path),
+        area_path: s.area_path.clone(),
         board_url: s.effective_board_url(),
         time_zone: s.time_zone.clone(),
         lookback_days: s.lookback_days,
@@ -376,6 +379,12 @@ pub async fn search_people(state: &AppState, query: String) -> Result<Vec<Person
 pub async fn iterations(state: &AppState) -> Result<Vec<Iteration>, String> {
     let (s, auth) = state.signed_in().await?;
     Ado { http: &state.http, settings: &s, auth }.iterations().await
+}
+
+/// The project's area paths, to move a ticket to another team's area.
+pub async fn areas(state: &AppState) -> Result<Vec<String>, String> {
+    let (s, auth) = state.signed_in().await?;
+    Ado { http: &state.http, settings: &s, auth }.areas().await
 }
 
 /* ---------------------------------------------------------------- state */
