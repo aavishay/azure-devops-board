@@ -170,6 +170,9 @@ pub struct FieldChange {
 pub struct TicketEdit {
     pub id: u64,
     pub rev: u64,
+    /// A new title; it can't be blank.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub state: Option<String>,
     #[serde(default)]
@@ -530,6 +533,17 @@ fn history(updates: &Value) -> Vec<HistoryEntry> {
 
 fn edit_ops(e: &TicketEdit) -> Result<Vec<Value>, String> {
     let mut ops = vec![json!({ "op": "test", "path": "/rev", "value": e.rev })];
+    if let Some(t) = &e.title {
+        // One line, as Azure DevOps shows it; line breaks and runs of spaces become one space.
+        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t.is_empty() {
+            return Err("A title can't be empty.".into());
+        }
+        if t.chars().count() > 255 {
+            return Err("A title can be at most 255 characters long.".into());
+        }
+        ops.push(json!({ "op": "add", "path": "/fields/System.Title", "value": t }));
+    }
     if let Some(s) = e.state.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         ops.push(json!({ "op": "add", "path": "/fields/System.State", "value": s }));
     }
@@ -625,7 +639,7 @@ mod tests {
 
     #[test]
     fn edit_patch() {
-        let e = TicketEdit { id: 5, rev: 7, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
+        let e = TicketEdit { id: 5, rev: 7, title: None, state: Some("Done".into()), assigned_to: Some(String::new()), priority: Some(1), numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
         let ops = edit_ops(&e).unwrap();
         assert_eq!(ops[0], json!({ "op": "test", "path": "/rev", "value": 7 }));
         assert_eq!(ops[1], json!({ "op": "add", "path": "/fields/System.State", "value": "Done" }));
@@ -651,6 +665,11 @@ mod tests {
         assert_eq!(edit_ops(&tags(&["web", " auth ", "", "Web"])).unwrap()[1], json!({ "op": "add", "path": "/fields/System.Tags", "value": "web; auth" }));
         assert_eq!(edit_ops(&tags(&[])).unwrap()[1]["value"], "", "no tags left: the field is emptied");
         assert!(edit_ops(&tags(&["a;b"])).unwrap_err().contains("separate tags"));
+        let title = |t: &str| edit_ops(&TicketEdit { title: Some(t.into()), ..none.clone() });
+        assert_eq!(title("  Login\n loops  again ").unwrap()[1], json!({ "op": "add", "path": "/fields/System.Title", "value": "Login loops again" }));
+        assert!(title(" \n ").unwrap_err().contains("can't be empty"));
+        assert!(title(&"x".repeat(256)).unwrap_err().contains("255"));
+        assert_eq!(title(&"é".repeat(255)).unwrap().len(), 2, "255 characters is fine, whatever the bytes");
     }
 
     #[test]
@@ -780,7 +799,7 @@ mod tests {
         assert_eq!(ado.areas().await.unwrap(), ["Fabrikam", "Fabrikam\\DevOps", "Fabrikam\\DevOps\\Infra"]);
         assert_eq!(ado.tags().await.unwrap(), ["Auth", "observability-q4-2026", "web"]);
 
-        let edit = |rev, state: &str| TicketEdit { id: 7, rev, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
+        let edit = |rev, state: &str| TicketEdit { id: 7, rev, title: None, state: Some(state.into()), assigned_to: None, priority: None, numbers: BTreeMap::new(), iteration: None, area: None, tags: None };
         ado.edit(&edit(4, "Done")).await.unwrap();
         assert_eq!(ado.edit(&edit(3, "Done")).await.unwrap_err(), STALE);
         let rule = ado.edit(&edit(4, "Bogus")).await.unwrap_err();
