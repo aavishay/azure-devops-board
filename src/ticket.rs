@@ -208,7 +208,7 @@ impl Ado<'_> {
 
         let (ty, comments_v, updates, links, me) = tokio::join!(
             self.call(reqwest::Method::GET, format!("{api}/wit/workitemtypes/{}?api-version=7.1", enc(&kind)), None),
-            self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/comments?$top=50&order=desc&{COMMENTS_API}"), None),
+            self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/comments?$top=50&order=desc&$expand=renderedText&{COMMENTS_API}"), None),
             self.call(reqwest::Method::GET, format!("{api}/wit/workItems/{id}/updates?$top=200&api-version=7.1"), None),
             async {
                 if linked.is_empty() {
@@ -277,6 +277,8 @@ impl Ado<'_> {
                 .chain(cs.iter().flat_map(|c| [c["createdBy"].clone(), c["modifiedBy"].clone()]))
                 .chain(us.iter().map(|u| u["revisedBy"].clone()))
                 .filter_map(|p| known_person(&p))
+                // Azure DevOps names everyone a comment mentions in its rendered HTML.
+                .chain(cs.iter().flat_map(|c| rendered_mentions(c["renderedText"].as_str().unwrap_or(""))))
                 .collect()
         }).await;
         let (_, assigned_full) = owner_of(&f["System.AssignedTo"]);
@@ -394,6 +396,23 @@ fn mention_ids(text: &str) -> Vec<String> {
 fn known_person(v: &Value) -> Option<(String, String)> {
     let id = v["id"].as_str().filter(|s| !s.is_empty())?;
     Some((id.to_ascii_lowercase(), owner_of(v).1?))
+}
+
+/// The people a comment's rendered HTML mentions, from links like
+/// `<a data-vss-mention="version:2.0,{id}" …>@Name</a>`.
+fn rendered_mentions(html: &str) -> Vec<(String, String)> {
+    const MARK: &str = "data-vss-mention=\"version:2.0,";
+    let mut out = Vec::new();
+    for (i, _) in html.match_indices(MARK) {
+        let rest = &html[i + MARK.len()..];
+        let Some((id, rest)) = rest.split_once('"') else { continue };
+        let Some(text) = rest.split_once('>').and_then(|(_, r)| r.split_once("</a>")).map(|(t, _)| t) else { continue };
+        let name = text.trim().trim_start_matches('@').replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">");
+        if let (false, Some(name)) = (mention_ids(&format!("@<{id}>")).is_empty(), owner_of(&Value::String(name)).1) {
+            out.push((id.to_ascii_lowercase(), name));
+        }
+    }
+    out
 }
 
 /// Display names from an identities lookup, by lowercase id.
@@ -769,6 +788,9 @@ mod tests {
         assert_eq!(known_person(&json!({ "displayName": "No Id" })), None);
         let v = json!({ "value": [{ "id": "X1", "providerDisplayName": "Kim Lee", "customDisplayName": "Kimmy" }, { "id": "X2", "providerDisplayName": " " }, null] });
         assert_eq!(identity_names(&v), [("x1".to_string(), "Kimmy".to_string())]);
+        let html = r#"<p><a href="" data-vss-mention="version:2.0,A0000000-0000-0000-0000-00000000000A" class="mention-link ">@Pat Kim (Contractor)</a> <a href="" data-vss-mention="version:2.0,B0000000-0000-0000-0000-00000000000B">@Lou &amp; Co</a> <a data-vss-mention="version:2.0,bad">@X</a></p>"#;
+        assert_eq!(rendered_mentions(html), [(a.to_string(), "Pat Kim".to_string()), ("b0000000-0000-0000-0000-00000000000b".to_string(), "Lou & Co".to_string())]);
+        assert!(rendered_mentions("<p>no mentions</p>").is_empty());
     }
 
     #[test]
@@ -823,14 +845,15 @@ mod tests {
                     "fields": [{ "referenceName": PRIORITY }, { "referenceName": "Microsoft.VSTS.Scheduling.Effort" }, { "referenceName": "System.Title" }] }),
                 ("GET", p) if p.ends_with("/comments") => json!({ "comments": [
                     { "id": 2, "createdBy": { "displayName": "Alex Doe", "id": "me-1" }, "createdDate": "2026-11-02T10:00:00Z", "text": "<div>Seen it</div>" },
-                    { "id": 1, "createdBy": { "displayName": "Sam Roe", "id": "other-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "<div>Found it</div>" },
+                    { "id": 1, "createdBy": { "displayName": "Sam Roe", "id": "other-2" }, "createdDate": "2026-11-01T10:00:00Z", "text": "<div>Found it</div>",
+                        "renderedText": "<p><a href=\"\" data-vss-mention=\"version:2.0,C0000000-0000-0000-0000-000000000003\" class=\"mention-link \">@Lee Park (Ops)</a> found it</p>" },
                 ] }),
                 ("GET", p) if p.ends_with("/wit/tags") => json!({ "value": [{ "name": "web" }, { "name": "Auth" }, { "name": "auth" }, { "name": "observability-q4-2026" }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Areas") => json!({ "name": "Fabrikam", "children": [{ "name": "DevOps", "children": [{ "name": "Infra" }] }] }),
                 ("GET", p) if p.ends_with("/wit/classificationnodes/Iterations") => json!({ "name": "Fabrikam", "children": [{ "name": "Sprint 42" }] }),
                 ("GET", p) if p.ends_with("/contoso/_apis/identities") => {
                     let q = u.query().unwrap_or("");
-                    assert!(q.contains("identityIds=b0000000-0000-0000-0000-000000000002,c0000000-0000-0000-0000-000000000003"), "only people not already on the ticket: {q}");
+                    assert!(q.contains("identityIds=b0000000-0000-0000-0000-000000000002&"), "only people not already on the ticket or named by a comment: {q}");
                     json!({ "value": [{ "id": "B0000000-0000-0000-0000-000000000002", "providerDisplayName": "Kim Lee (Ops)", "customDisplayName": null }] })
                 }
                 ("GET", p) if p.ends_with("/_apis/connectionData") => json!({ "authenticatedUser": { "id": "me-1", "providerDisplayName": "Alex Doe" } }),
@@ -894,8 +917,8 @@ mod tests {
         assert_eq!(t.comments[0].author, "Alex Doe");
         assert_eq!(
             t.people.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(),
-            [("a0000000-0000-0000-0000-000000000001", "Sam Roe"), ("b0000000-0000-0000-0000-000000000002", "Kim Lee")],
-            "mentions: one on the ticket, one looked up, one nobody knows"
+            [("a0000000-0000-0000-0000-000000000001", "Sam Roe"), ("b0000000-0000-0000-0000-000000000002", "Kim Lee"), ("c0000000-0000-0000-0000-000000000003", "Lee Park")],
+            "mentions: one on the ticket, one looked up, one named by a comment's rendered text"
         );
         assert_eq!(t.comments.iter().map(|c| (c.id, c.mine)).collect::<Vec<_>>(), [(2, true), (1, false)]);
         ado.edit_comment(7, 2, "Seen it\ntwice", false).await.unwrap();
