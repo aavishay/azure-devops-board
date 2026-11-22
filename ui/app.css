@@ -338,3 +338,12 @@ body.tk-resizing .wrap{transition:none}
 .pick-list li.on .muted,.pick-list li[data-i]:hover .muted{color:inherit;opacity:.8}
 .pick-list li.pick-none{cursor:default;color:var(--muted)}
 .pick-list li[data-cur]{font-weight:600}
+/* Tags in the ticket panel: chips with a remove button, then a box to add one. */
+.tk-tags{flex:1 1 100%;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12.5px}
+.tk-tags .lbl{font-weight:500;flex:0 0 100%}
+.tk-taglist{display:contents}
+.tk-tags .tag{display:inline-flex;align-items:center;gap:2px;font-size:12.5px;padding:2px 4px 2px 9px;border-radius:12px}
+.tk-tags .tag-x{border:0;background:none;color:var(--muted);cursor:pointer;font:inherit;font-size:14px;line-height:1;padding:0 4px;border-radius:8px}
+.tk-tags .tag-x:hover,.tk-tags .tag-x:focus-visible{color:var(--fg);background:var(--line)}
+.tk-tags .pick{flex:1 1 180px;max-width:280px}
+.tk-tags .pick-in{min-width:0;width:100%}
